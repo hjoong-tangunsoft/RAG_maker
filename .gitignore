@@ -1,0 +1,47 @@
+# opencode runtime state
+.omo/
+.codegraph
+.opencode/
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+!*.env.example
+!rag.env.example
+
+# dist / build
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# logs / local scratch
+*.log
+logs/
+tmp/
+scratch/
+
+# secrets - never commit real env files
+rag.env
+*.pem
+*.key

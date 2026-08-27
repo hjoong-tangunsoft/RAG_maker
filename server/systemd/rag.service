@@ -1,0 +1,32 @@
+# /etc/systemd/system/rag.service
+[Unit]
+Description=RAG service (retrieval + OpenAI-compat proxy over LiteLLM)
+After=network-online.target litellm.service
+Wants=network-online.target
+Wants=litellm.service
+
+[Service]
+Type=simple
+User=rocky
+Group=rocky
+WorkingDirectory=/upload/rag
+Environment=PATH=/upload/rag/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=/upload/rag/models
+Environment=HUGGINGFACE_HUB_CACHE=/upload/rag/models
+Environment=TRANSFORMERS_CACHE=/upload/rag/models
+Environment=TOKENIZERS_PARALLELISM=false
+EnvironmentFile=-/upload/rag/rag.env
+ExecStart=/upload/rag/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8100 --workers 1 --log-level info
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+# Resource hints - CPU embedding is the heaviest work here
+CPUQuota=350%
+MemoryHigh=4G
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target
