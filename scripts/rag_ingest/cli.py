@@ -72,6 +72,15 @@ def cmd_sync(args) -> int:
     print(f"  Failed:          {result.failed}")
     print(f"  Still pending:   {result.pending}")
     print(f"  Tracked after:   {result.tracked_after}")
+    if result.done > 0:
+        avg = result.total_duration_ms // result.done
+        print(f"  Total duration:  {result.total_duration_ms} ms  (avg {avg} ms/doc)")
+        print()
+        print(f"Ingested content:")
+        for d in result.processed:
+            title_str = d.title[:70] if d.title else "(no title)"
+            print(f"  - {d.filename:<28}  {d.chunks} chunks · {d.bytes:>5}B · {d.duration_ms:>4}ms")
+            print(f"      {title_str}")
     return 0 if result.failed == 0 else 2
 
 
