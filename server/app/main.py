@@ -37,6 +37,8 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     StatsResponse,
+    TeachRequest,
+    TeachResponse,
 )
 from .store import get_store
 
@@ -168,6 +170,38 @@ async def ingest_url(body: IngestURLRequest) -> IngestResponse:
     return _index(text, label, body.doc_id, {"url": body.url, **body.metadata})
 
 
+@app.post("/rag/teach", dependencies=[AuthDep])
+async def teach_endpoint(body: TeachRequest) -> TeachResponse:
+    """Explicit teach endpoint (Path 3, bypasses natural-language trigger).
+
+    Same underlying storage as chat trigger. Tagged with
+    strategy='explicit-api' so admin queries can filter it separately from
+    both chat-teach and batch ingest.
+    """
+    from . import teach as _teach
+    try:
+        result = _teach.auto_ingest(
+            content=body.content,
+            trigger="explicit-api",
+            strategy="explicit-api",
+            source_override=body.source,
+            metadata_override={
+                "explicit_teach": True,
+                **(body.metadata or {}),
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return TeachResponse(
+        doc_id=result["doc_id"],
+        chunks=result["chunks"],
+        bytes=result["bytes"],
+        source=result["source"],
+        strategy=result["strategy"],
+        trigger=result["trigger"],
+    )
+
+
 # ---------- retrieval ----------
 
 @app.post("/rag/search", dependencies=[AuthDep])
@@ -212,6 +246,57 @@ async def models() -> Any:
 
 @app.post("/rag/v1/chat/completions", dependencies=[AuthDep])
 async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any:
+    # ---- Path 3: teach trigger detection (chat middleware) ----
+    # If the user's last message contains a natural-language teach trigger
+    # ("학습해", "저장해", "기억해", "@save", etc.), auto-ingest the content
+    # and return a confirmation instead of running normal RAG.
+    if body.rag and body.messages:
+        from . import teach as _teach
+
+        last_user_msg = next(
+            (m for m in reversed(body.messages) if m.role == "user"),
+            None,
+        )
+        if last_user_msg:
+            trigger = _teach.detect_teach_trigger(last_user_msg.content)
+            if trigger:
+                try:
+                    content, strategy = _teach.extract_teachable_content(
+                        current_msg=last_user_msg.content,
+                        trigger=trigger,
+                        prev_assistant_msg=_teach.find_prev_assistant(body.messages),
+                    )
+                    result = _teach.auto_ingest(
+                        content=content,
+                        trigger=trigger,
+                        strategy=strategy,
+                    )
+                    confirmation = _teach.format_confirmation_message(result, content)
+                    return JSONResponse({
+                        "id": f"chatcmpl-teach-{result['doc_id'][-8:]}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": body.model or settings.default_model,
+                        "choices": [{
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": confirmation,
+                            },
+                        }],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                        "teach": result,
+                    })
+                except ValueError as e:
+                    # Trigger detected but no content extractable - most
+                    # likely a false positive. Fall through to normal RAG.
+                    log.info("teach trigger detected but extraction failed: %s", e)
+
     # If rag=false, straight passthrough
     messages_out: list[dict[str, str]]
     hits: list[dict[str, Any]] = []

@@ -113,3 +113,27 @@ class StatsResponse(BaseModel):
     embed_model: str
     llm_model: str
     chroma_dir: str
+
+
+# ---------- Teach (Path 3 - explicit ingest via chat semantics) ----------
+
+class TeachRequest(BaseModel):
+    """Explicit teach endpoint request (POST /rag/teach).
+
+    Used by:
+    - Sync CLI scripts, admin UI buttons (bypass natural-language trigger)
+    - When the exact content boundary needs to be programmatic
+    """
+    content: str = Field(..., min_length=30)
+    source: str | None = None
+    doc_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TeachResponse(BaseModel):
+    doc_id: str
+    chunks: int
+    bytes: int
+    source: str
+    strategy: str  # 'marker-block' | 'user-message' | 'prev-assistant' | 'explicit-api'
+    trigger: str  # trigger phrase, or 'explicit-api' if via /rag/teach
