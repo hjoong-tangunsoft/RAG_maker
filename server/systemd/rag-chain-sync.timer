@@ -1,0 +1,30 @@
+# /etc/systemd/system/rag-chain-sync.timer
+# Business-hours frequent RAG sync chain.
+# Fires every 15 min during KST work hours (08:00 - 18:00, weekdays)
+# in ADDITION to the daily catch-up timers (jira-export.timer 02:45 UTC,
+# rag-sync.timer 03:00 UTC).
+#
+# Schedule (KST):
+#   Mon-Fri 08:00, 08:15, 08:30, 08:45
+#   ...
+#   Mon-Fri 17:00, 17:15, 17:30, 17:45
+#   Mon-Fri 18:00                        <- final fire of the day
+# Total: 41 fires per weekday, 205 per week.
+#
+# Persistent=false so a downtime doesn't cause a burst of missed fires;
+# the daily timers act as safety net for any missed coverage.
+[Unit]
+Description=RAG chain sync timer (KST work hours, Mon-Fri, every 15 min)
+Documentation=https://github.com/hjoong-tangunsoft/RAG_maker/blob/RAG_maker/docs/DESIGN_PRINCIPLES.md
+
+[Timer]
+# 08:00 - 17:45 every 15 min (40 fires)
+OnCalendar=Mon..Fri *-*-* 08..17:00/15:00 Asia/Seoul
+# 18:00 sharp (final fire, +1)
+OnCalendar=Mon..Fri *-*-* 18:00:00 Asia/Seoul
+Persistent=false
+RandomizedDelaySec=45
+Unit=rag-chain-sync.service
+
+[Install]
+WantedBy=timers.target
