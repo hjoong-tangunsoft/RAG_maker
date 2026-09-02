@@ -120,7 +120,7 @@ async def answer(
     hits = retrieve(query, k=k, where=where)
     messages = build_rag_messages(query, hits, system_prompt=system_prompt)
     used_model = model or settings.default_model
-    resp = await llm.chat(
+    resp = await llm.chat_guarded(
         messages,
         model=used_model,
         temperature=temperature,

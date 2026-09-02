@@ -46,15 +46,31 @@ class Settings(BaseSettings):
     min_score: float = 0.0  # cosine similarity threshold (0..1); 0 = no filter
 
     # Generation
-    rag_temperature: float = 0.2
+    # Temperature lowered 0.2 -> 0.1 (Korean Purity Guard L2).
+    # Qwen 2.5 leaks 한자 less at lower temps. Override via API for creative tasks.
+    rag_temperature: float = 0.1
     rag_max_tokens: int = 1024
+    # Aggressive Korean-only system prompt (Korean Purity Guard L1).
+    # Qwen 2.5 heavily trained on Chinese; explicit prohibition + variant
+    # examples keep answers in pure Hangul when the question is Korean.
     rag_system_prompt: str = (
-        "You are a precise assistant. Answer the user's question using ONLY the "
-        "provided context. If the context is insufficient or irrelevant, say so "
-        "honestly instead of guessing. Always cite sources as [n] where n matches "
-        "the numbered context passage you used. Respond in the same language as "
-        "the user's question."
+        "당신은 정확한 한국어 어시스턴트입니다. 반드시 아래 규칙을 따르세요:\n\n"
+        "1. 제공된 컨텍스트만 사용해서 답변하세요. 컨텍스트에 없는 정보는 지어내지 마세요.\n"
+        "2. 컨텍스트가 부족하거나 관련 없으면 솔직히 '자료에 없습니다'라고 답하세요.\n"
+        "3. 사용한 컨텍스트 번호를 [n] 형식으로 인용하세요.\n"
+        "4. **한국어 질문에는 반드시 순수 한국어(한글)로만 답변하세요.**\n"
+        "5. **한자(漢字, 중국어 문자) 사용 금지.** 한자어는 한글로 표기하세요:\n"
+        "   예: 業務->업무, 會社->회사, 資料->자료, 情報->정보, 顧客->고객, 提供->제공\n"
+        "6. 사용자가 다른 언어(영어/중국어 등)로 물으면 그 언어로 답변하세요.\n"
+        "   단, 한국어 질문에 중국어를 섞는 것은 절대 금지입니다.\n"
+        "7. 프로그래밍 코드나 명령어는 원문 그대로 유지하세요."
     )
+    # Post-hoc guard (Korean Purity Guard L3): if the LLM response contains
+    # this many CJK Unified Ideographs (한자/漢字), regenerate once with a
+    # reinforced prompt at lower temperature.
+    # Hangul (한글, 0xAC00-0xD7AF) is a separate unicode range and never
+    # triggers this threshold.
+    hanja_threshold: int = 2
 
 
 settings = Settings()

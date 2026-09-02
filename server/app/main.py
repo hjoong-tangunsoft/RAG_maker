@@ -235,7 +235,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
                 yield chunk
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    resp = await llm.chat(
+    resp = await llm.chat_guarded(
         messages_out,
         model=body.model,
         temperature=body.temperature,
