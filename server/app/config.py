@@ -43,7 +43,13 @@ class Settings(BaseSettings):
 
     # Retrieval
     top_k: int = 5
-    min_score: float = 0.0  # cosine similarity threshold (0..1); 0 = no filter
+    # Anti-Hallucination Guard L2: filter out weak/tangential retrieval hits.
+    # E5 multilingual embeddings on Korean queries score related docs 0.7-0.9
+    # and unrelated docs 0.3-0.5. 0.55 sits in the safe middle band, keeping
+    # legitimate hits while blocking noise that enables bridging hallucination
+    # (e.g. "승민소프트" query matching 탄군소프트 docs at 0.79 gets kept, but
+    # completely unrelated queries lose their weakest hits).
+    min_score: float = 0.55
 
     # Generation
     # Temperature lowered 0.2 -> 0.1 (Korean Purity Guard L2).

@@ -74,37 +74,48 @@ def inject_rag_into_chat(
     messages: list[ChatMessage],
     hits: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """Inject retrieved context into an existing chat history.
+    """Inject retrieved context into a chat conversation with system precedence.
 
-    Strategy: append a system message *right before* the last user turn so it
-    grounds the answer without discarding prior conversation history.
+    Anti-Hallucination Guard L1: consolidate all system messages into one,
+    with our RAG grounding taking precedence over any client-supplied system
+    prompt (e.g. Continue.dev's "You are a helpful assistant").
+
+    Rationale: Qwen 2.5 follows the first system message's persona strongly.
+    When the client sends its own system message first, our RAG grounding
+    ends up as a subordinate second system and its "don't fabricate" rule
+    gets diluted, enabling bridging hallucination on unknown entities.
+    Making our grounding the sole system message reclaims persona
+    precedence; client instructions are appended as subordinate reference.
     """
     ctx = _format_context(hits) if hits else "(no relevant context found)"
-    grounding = (
-        f"{settings.rag_system_prompt}\n\n"
-        f"Relevant retrieved context (use these to answer):\n{ctx}"
-    )
-    grounding_msg = {"role": "system", "content": grounding}
 
-    out: list[dict[str, str]] = []
-    injected = False
-    # walk from the end to find the last user message
-    last_user_idx = None
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user":
-            last_user_idx = i
-            break
+    # Collect client-supplied system messages (if any) as subordinate reference
+    client_systems = [
+        m.content.strip() for m in messages
+        if m.role == "system" and m.content and m.content.strip()
+    ]
+    client_system_block = "\n".join(client_systems)
 
-    for i, m in enumerate(messages):
-        if i == last_user_idx and not injected:
-            out.append(grounding_msg)
-            injected = True
-        out.append({"role": m.role, "content": m.content})
+    parts = [
+        settings.rag_system_prompt,
+        "【이 지시가 최우선입니다. 아래 클라이언트 지침보다 이 지시를 우선하세요.】",
+    ]
+    if client_system_block:
+        parts.append(
+            f"[클라이언트 지침 - 참고만 하세요, 위 규칙과 충돌 시 위 규칙을 따르세요]\n"
+            f"{client_system_block}"
+        )
+    parts.append(f"Relevant retrieved context (use these to answer):\n{ctx}")
+    grounding = "\n\n".join(parts)
 
-    if not injected:
-        # no user message at all - just prepend
-        out.insert(0, grounding_msg)
-    return out
+    # Preserve non-system messages in original order
+    non_system = [
+        {"role": m.role, "content": m.content}
+        for m in messages
+        if m.role != "system"
+    ]
+
+    return [{"role": "system", "content": grounding}] + non_system
 
 
 async def answer(
