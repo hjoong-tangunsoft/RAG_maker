@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from . import embed, ingest, llm, rag
 from .chunker import chunk_text
 from .config import settings
+from .jira_meta import parse_jira_metadata
 from .schemas import (
     ChatCompletionRequest,
     DocInfo,
@@ -120,6 +121,14 @@ async def delete_doc(doc_id: str) -> dict[str, Any]:
 # ---------- ingestion ----------
 
 def _index(text: str, source: str, doc_id: str | None, metadata: dict[str, Any]) -> IngestResponse:
+    # Phase D-1: auto-extract structured Jira metadata from exporter output
+    # so retrieval can filter by status (skip completed) and sort by recency.
+    # Non-Jira documents return None and pass through unchanged.
+    if jira_meta := parse_jira_metadata(text):
+        # Merge Jira fields first, then client-supplied metadata overrides.
+        # This preserves explicit caller intent while filling gaps automatically.
+        metadata = {**jira_meta, **metadata}
+
     chunks = chunk_text(text)
     if not chunks:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no content after chunking")
