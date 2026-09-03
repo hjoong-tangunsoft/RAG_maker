@@ -72,11 +72,11 @@ class Settings(BaseSettings):
         "7. 프로그래밍 코드나 명령어는 원문 그대로 유지하세요."
     )
     # Post-hoc guard (Korean Purity Guard L3): if the LLM response contains
-    # this many CJK Unified Ideographs (한자/漢字), regenerate once with a
-    # reinforced prompt at lower temperature.
+    # this many CJK Unified Ideographs (한자/漢字), regenerate with a
+    # reinforced prompt. Phase E lowered from 2 → 0 (zero tolerance).
     # Hangul (한글, 0xAC00-0xD7AF) is a separate unicode range and never
     # triggers this threshold.
-    hanja_threshold: int = 2
+    hanja_threshold: int = 0
 
 
 settings = Settings()

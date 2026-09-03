@@ -1,6 +1,8 @@
 """FastAPI application: RAG endpoints + OpenAI-compatible passthrough."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
@@ -319,14 +321,57 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         messages_out = [{"role": m.role, "content": m.content} for m in body.messages]
 
     if body.stream:
+        # Phase E-1: buffer through chat_guarded then emit as fake SSE chunks.
+        # Real streaming from stream_chat() bypasses the hanja guard because
+        # mid-stream retry is impossible; buffering trades realtime UX for
+        # 100% Korean-only guarantee (see Notion blog for rationale).
+        guarded = await llm.chat_guarded(
+            messages_out,
+            model=body.model,
+            temperature=body.temperature,
+            max_tokens=body.max_tokens,
+        )
+        content = guarded["choices"][0]["message"]["content"]
+        model_name = guarded.get("model", body.model or settings.default_model)
+        citations_data = None
+        if body.rag and hits:
+            citations_data = [c.model_dump() for c in rag._hits_to_citations(hits)]
+
         async def gen():
-            async for chunk in llm.stream_chat(
-                messages_out,
-                model=body.model,
-                temperature=body.temperature,
-                max_tokens=body.max_tokens,
-            ):
-                yield chunk
+            chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
+            chunk_size = 40  # small chunks feel more like real streaming
+            for i in range(0, len(content), chunk_size):
+                piece = content[i:i + chunk_size]
+                chunk = {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": piece},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                await asyncio.sleep(0.02)
+            final = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }],
+            }
+            if citations_data:
+                final["citations"] = citations_data
+            yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     resp = await llm.chat_guarded(

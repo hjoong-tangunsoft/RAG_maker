@@ -136,42 +136,86 @@ async def chat_guarded(
     temperature: float | None = None,
     max_tokens: int | None = None,
     extra: dict[str, Any] | None = None,
-    max_retries: int = 1,
+    max_retries: int = 2,
 ) -> dict[str, Any]:
-    """chat() + retry once if response contains too many CJK ideographs.
+    """Zero-tolerance hanja guard (Phase E).
 
-    Streaming callers should use stream_chat() directly (mid-stream retry
-    is not possible).
+    Up to (1 + max_retries) attempts to generate a response with
+    hanja_count() <= settings.hanja_threshold. Each retry uses a reinforced
+    system prompt and a lower temperature. If all attempts fail, apply
+    _convert_hanja_to_hangul() to the last response as a last-resort
+    transliteration (李贤中 → 이현중).
+
+    Non-streaming callers use this directly. Streaming callers go through
+    the buffered-SSE wrapper in main.py so they get the same guarantees.
     """
-    resp = await chat(
-        messages, model=model, temperature=temperature,
-        max_tokens=max_tokens, extra=extra,
-    )
-    try:
-        text = resp["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return resp  # unexpected shape, don't crash
+    current_messages = messages
+    base_temp = settings.rag_temperature if temperature is None else temperature
+    # Escalating strictness: temperature drops with each retry attempt.
+    temps = [base_temp, min(base_temp / 2, 0.05), 0.02]
 
-    n = hanja_count(text)
-    if n <= settings.hanja_threshold or max_retries <= 0:
-        return resp
+    resp: dict[str, Any] = {}
+    text = ""
+    n = 0
+    for attempt in range(max_retries + 1):
+        temp_this = temps[attempt] if attempt < len(temps) else 0.02
+        resp = await chat(
+            current_messages, model=model, temperature=temp_this,
+            max_tokens=max_tokens, extra=extra,
+        )
+        try:
+            text = resp["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            return resp  # unexpected shape - can't guard
 
-    log.warning("hanja leak detected (%d chars), regenerating with reinforced prompt", n)
-    retry_messages = _reinforce_korean_only(messages)
-    resp2 = await chat(
-        retry_messages,
-        model=model,
-        temperature=0.05,  # extra-low for strict retry
-        max_tokens=max_tokens,
-        extra=extra,
-    )
-    try:
-        text2 = resp2["choices"][0]["message"]["content"]
-        n2 = hanja_count(text2)
-        if n2 > 0:
-            log.error("hanja still present after retry: %d chars", n2)
+        n = hanja_count(text)
+        if n <= settings.hanja_threshold:
+            if attempt > 0:
+                log.info("hanja resolved after retry %d (final=%d)", attempt, n)
+            return resp
+
+        if attempt < max_retries:
+            next_temp = temps[attempt + 1] if attempt + 1 < len(temps) else 0.02
+            log.warning(
+                "attempt %d: hanja=%d > threshold=%d, retrying (temp=%.3f)",
+                attempt, n, settings.hanja_threshold, next_temp,
+            )
+            current_messages = _reinforce_korean_only(current_messages)
         else:
-            log.info("retry successful, hanja removed")
-    except (KeyError, IndexError, TypeError):
-        pass
-    return resp2
+            log.error(
+                "attempt %d: hanja=%d still present after all retries, "
+                "applying last-resort conversion",
+                attempt, n,
+            )
+
+    # All retries exhausted - convert hanja to hangul as last resort
+    converted = _convert_hanja_to_hangul(text)
+    final_n = hanja_count(converted)
+    log.warning(
+        "last-resort hanja conversion: %d -> %d (%s)",
+        n, final_n, "clean" if final_n == 0 else "partial",
+    )
+    resp["choices"][0]["message"]["content"] = converted
+    return resp
+
+
+def _convert_hanja_to_hangul(text: str) -> str:
+    """Last-resort: transliterate hanja to Korean phonetic reading.
+
+    Uses the `hanja` PyPI package for K-reading conversion (e.g.
+    李贤中 → 이현중, 業務 → 업무). Falls back to stripping hanja chars if
+    the library is not installed or raises.
+
+    Note: transliteration is character-level; whole-sentence translation
+    (e.g. 应该完成 → 해야 할 일) is out of scope. This is a safety net,
+    not a translator.
+    """
+    try:
+        import hanja  # noqa: PLC0415 - optional dep, lazy import
+        return hanja.translate(text, "substitution")
+    except ImportError:
+        log.warning("hanja lib not installed; stripping hanja chars instead")
+        return _HANJA_RE.sub("", text)
+    except Exception as e:  # noqa: BLE001
+        log.error("hanja conversion failed (%s); stripping instead", e)
+        return _HANJA_RE.sub("", text)
