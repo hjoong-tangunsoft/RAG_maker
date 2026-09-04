@@ -43,6 +43,28 @@ def _hits_to_citations(hits: list[dict[str, Any]]) -> list[Citation]:
     return out
 
 
+def format_citations_footer(citations: list[Citation]) -> str:
+    """Render a markdown footer listing sources (Issue #9 Option A).
+
+    Empty string when there are no citations - callers can append
+    unconditionally without needing to check.
+
+    Format:
+        \\n\\n---\\n**출처**\\n[1] source (score 0.87)\\n[2] ...
+
+    The leading blank line ensures markdown renders the `---` as HR
+    even when body ends without a trailing newline. `source` falls
+    back to `doc_id` when the metadata source label is missing.
+    """
+    if not citations:
+        return ""
+    lines = [
+        f"[{c.n}] {c.source or c.doc_id or 'unknown'} (score {c.score:.2f})"
+        for c in citations
+    ]
+    return "\n\n---\n**출처**\n" + "\n".join(lines)
+
+
 def retrieve(
     query: str,
     k: int | None = None,
@@ -237,4 +259,7 @@ async def answer(
     except (KeyError, IndexError, TypeError) as e:
         log.error("bad LLM response shape: %s", resp)
         raise RuntimeError("upstream LLM returned unexpected shape") from e
-    return text, _hits_to_citations(hits), used_model
+    citations = _hits_to_citations(hits)
+    if settings.append_citations_to_body:
+        text = text + format_citations_footer(citations)
+    return text, citations, used_model

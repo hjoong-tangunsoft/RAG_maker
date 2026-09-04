@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # triggers this threshold.
     hanja_threshold: int = 0
 
+    # Citations display (Issue #9 Option A)
+    # When True, /rag/query and /rag/v1/chat/completions (rag=true) append a
+    # markdown footer listing sources to the answer body, so clients that
+    # don't parse the extra `citations` JSON field (e.g. Continue.dev) still
+    # see sources rendered as text. Disable to keep pure LLM output.
+    append_citations_to_body: bool = True
+
 
 settings = Settings()
 

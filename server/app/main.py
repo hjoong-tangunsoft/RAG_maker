@@ -257,11 +257,23 @@ async def models() -> Any:
 
 @app.post("/rag/v1/chat/completions", dependencies=[AuthDep])
 async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any:
+    # ---- Phase F (Issue #23): detect tool-calling mode ----
+    # When the client provides `tools` or the message history contains
+    # tool_calls / tool responses (Continue.dev agent mode), skip both the
+    # teach trigger and RAG injection - the client is managing context via
+    # tools. Otherwise fall through to the existing RAG + teach pipeline.
+    has_tools = bool(body.tools)
+    has_tool_context = any(
+        (m.tool_calls or m.tool_call_id or m.role == "tool")
+        for m in body.messages
+    )
+    should_inject_rag = body.rag and not has_tools and not has_tool_context
+
     # ---- Path 3: teach trigger detection (chat middleware) ----
     # If the user's last message contains a natural-language teach trigger
     # ("학습해", "저장해", "기억해", "@save", etc.), auto-ingest the content
     # and return a confirmation instead of running normal RAG.
-    if body.rag and body.messages:
+    if should_inject_rag and body.messages:
         from . import teach as _teach
 
         last_user_msg = next(
@@ -308,19 +320,43 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
                     # likely a false positive. Fall through to normal RAG.
                     log.info("teach trigger detected but extraction failed: %s", e)
 
-    # If rag=false, straight passthrough
-    messages_out: list[dict[str, str]]
+    # RAG injection - skipped in tool-calling mode per Phase F above.
+    messages_out: list[dict[str, Any]]
     hits: list[dict[str, Any]] = []
-    if body.rag:
+    if should_inject_rag:
         # find the last user message to use as the retrieval query
-        last_user = next((m.content for m in reversed(body.messages) if m.role == "user"), None)
+        last_user = next(
+            (m.content for m in reversed(body.messages)
+             if m.role == "user" and m.content),
+            None,
+        )
         if last_user:
             hits = rag.retrieve(last_user, k=body.rag_k, where=body.rag_filter)
         messages_out = rag.inject_rag_into_chat(body.messages, hits)
     else:
-        messages_out = [{"role": m.role, "content": m.content} for m in body.messages]
+        # Tool mode or rag=false: preserve tool_calls / tool_call_id / name
+        # by using model_dump(exclude_none=True) instead of pulling only
+        # role+content (which would drop the tool-calling fields).
+        messages_out = [m.model_dump(exclude_none=True) for m in body.messages]
 
     if body.stream:
+        # Phase F (Issue #23): tool-calling mode streams tool_calls chunks
+        # directly per OpenAI spec. The hanja buffer would break tool_call
+        # streaming (which is structured JSON, not natural text) - safe to
+        # skip because tool responses aren't Korean prose.
+        if has_tools:
+            async def gen_tools():
+                async for chunk in llm.stream_chat(
+                    messages_out,
+                    model=body.model,
+                    temperature=body.temperature,
+                    max_tokens=body.max_tokens,
+                    tools=body.tools,
+                    tool_choice=body.tool_choice,
+                ):
+                    yield chunk
+            return StreamingResponse(gen_tools(), media_type="text/event-stream")
+
         # Phase E-1: buffer through chat_guarded then emit as fake SSE chunks.
         # Real streaming from stream_chat() bypasses the hanja guard because
         # mid-stream retry is impossible; buffering trades realtime UX for
@@ -334,8 +370,14 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         content = guarded["choices"][0]["message"]["content"]
         model_name = guarded.get("model", body.model or settings.default_model)
         citations_data = None
-        if body.rag and hits:
-            citations_data = [c.model_dump() for c in rag._hits_to_citations(hits)]
+        if should_inject_rag and hits:
+            citations_objs = rag._hits_to_citations(hits)
+            citations_data = [c.model_dump() for c in citations_objs]
+            # Issue #9 Option A: fold citations into body so Continue-style
+            # clients that ignore the extra `citations` field still see sources.
+            # Appended BEFORE chunking so the footer streams naturally as text.
+            if settings.append_citations_to_body:
+                content = content + rag.format_citations_footer(citations_objs)
 
         async def gen():
             chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -379,10 +421,24 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         model=body.model,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        tools=body.tools,
+        tool_choice=body.tool_choice,
     )
     # attach citations to response for clients that care
-    if body.rag and hits:
-        resp["citations"] = [c.model_dump() for c in rag._hits_to_citations(hits)]
+    if should_inject_rag and hits:
+        citations_objs = rag._hits_to_citations(hits)
+        resp["citations"] = [c.model_dump() for c in citations_objs]
+        # Issue #9 Option A: also fold into body for clients that ignore
+        # the extra `citations` field (e.g. Continue.dev).
+        if settings.append_citations_to_body:
+            try:
+                resp["choices"][0]["message"]["content"] = (
+                    resp["choices"][0]["message"]["content"]
+                    + rag.format_citations_footer(citations_objs)
+                )
+            except (KeyError, IndexError, TypeError):
+                # Non-standard shape - skip footer, keep raw response
+                log.warning("could not append citations footer: unexpected response shape")
     return JSONResponse(resp)
 
 
