@@ -22,13 +22,20 @@ def _headers() -> dict[str, str]:
 
 
 async def chat(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Non-streaming chat completion. Returns the full JSON response."""
+    """Non-streaming chat completion. Returns the full JSON response.
+
+    When `tools` is provided, they are passed to the upstream LLM verbatim
+    (OpenAI tool-calling spec). Tool responses come back as
+    choices[0].message.tool_calls per the spec.
+    """
     payload: dict[str, Any] = {
         "model": model or settings.default_model,
         "messages": messages,
@@ -36,6 +43,10 @@ async def chat(
         "max_tokens": settings.rag_max_tokens if max_tokens is None else max_tokens,
         "stream": False,
     }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     if extra:
         payload.update(extra)
     async with httpx.AsyncClient(timeout=300.0) as client:
@@ -45,13 +56,21 @@ async def chat(
 
 
 async def stream_chat(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
-    """Stream SSE bytes from the upstream chat endpoint straight to the caller."""
+    """Stream SSE bytes from the upstream chat endpoint straight to the caller.
+
+    Tool-calling: streams `delta.tool_calls` chunks per OpenAI spec when
+    `tools` are provided. Callers passing tools should use this path
+    directly (bypassing the hanja-guard buffer) because tool_calls are
+    structured JSON not natural text.
+    """
     payload: dict[str, Any] = {
         "model": model or settings.default_model,
         "messages": messages,
@@ -59,6 +78,10 @@ async def stream_chat(
         "max_tokens": settings.rag_max_tokens if max_tokens is None else max_tokens,
         "stream": True,
     }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     if extra:
         payload.update(extra)
     async with httpx.AsyncClient(timeout=None) as client:
@@ -131,10 +154,12 @@ def _reinforce_korean_only(messages: list[dict[str, str]]) -> list[dict[str, str
 
 
 async def chat_guarded(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     max_retries: int = 2,
 ) -> dict[str, Any]:
@@ -145,6 +170,9 @@ async def chat_guarded(
     system prompt and a lower temperature. If all attempts fail, apply
     _convert_hanja_to_hangul() to the last response as a last-resort
     transliteration (李贤中 → 이현중).
+
+    Tool-call responses (content=None with tool_calls) skip the hanja
+    check because tool_calls are structured JSON, not natural language.
 
     Non-streaming callers use this directly. Streaming callers go through
     the buffered-SSE wrapper in main.py so they get the same guarantees.
@@ -161,12 +189,18 @@ async def chat_guarded(
         temp_this = temps[attempt] if attempt < len(temps) else 0.02
         resp = await chat(
             current_messages, model=model, temperature=temp_this,
-            max_tokens=max_tokens, extra=extra,
+            max_tokens=max_tokens, tools=tools, tool_choice=tool_choice,
+            extra=extra,
         )
         try:
-            text = resp["choices"][0]["message"]["content"]
+            message = resp["choices"][0]["message"]
+            text = message.get("content")
         except (KeyError, IndexError, TypeError):
             return resp  # unexpected shape - can't guard
+
+        # Skip hanja check on tool_call responses (structured JSON, not text)
+        if text is None:
+            return resp
 
         n = hanja_count(text)
         if n <= settings.hanja_threshold:

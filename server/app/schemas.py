@@ -79,18 +79,57 @@ class QueryResponse(BaseModel):
 
 # ---------- OpenAI-compatible chat ----------
 
+class ToolFunction(BaseModel):
+    """Function metadata inside an assistant's tool_call.
+
+    Per OpenAI spec, `arguments` is a JSON-encoded string (not a dict) so
+    that streaming can build it up incrementally.
+    """
+    name: str
+    arguments: str
+
+
+class ToolCall(BaseModel):
+    """One tool invocation the LLM decided to make.
+
+    Assistant messages carrying tool_calls have content=None and the
+    client is expected to execute each tool and reply with a matching
+    tool-role message referencing this id.
+    """
+    id: str
+    type: Literal["function"] = "function"
+    function: ToolFunction
+
+
 class ChatMessage(BaseModel):
+    """OpenAI-compatible chat message with tool-calling support.
+
+    Content is optional because assistant messages carrying tool_calls
+    have content=None per the OpenAI spec. Tool-role messages carry the
+    execution result of a prior tool_call and reference it by
+    tool_call_id.
+    """
     role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    content: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None  # only on role="tool" messages
+    name: str | None = None  # tool name on role="tool" messages
 
 
 class ChatCompletionRequest(BaseModel):
-    """Superset of OpenAI's schema with an optional `rag` extension."""
+    """Superset of OpenAI's schema with a `rag` extension and tool_calls passthrough.
+
+    When `tools` is present the server passes them through to the upstream
+    LLM unchanged and skips RAG injection (Continue.dev-style agent mode).
+    """
     model: str = "qwen2.5-7b"
     messages: list[ChatMessage]
     temperature: float | None = None
     max_tokens: int | None = None
     stream: bool = False
+    # OpenAI tool-calling passthrough (Phase 1 of Issue #23)
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
     # RAG extension: if true (default when hitting /rag/v1/*), retrieval is applied
     rag: bool = True
     rag_k: int | None = None
