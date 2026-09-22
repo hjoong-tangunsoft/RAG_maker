@@ -269,6 +269,18 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
     )
     should_inject_rag = body.rag and not has_tools and not has_tool_context
 
+    # TEMP DEBUG: log tool names when present (diagnose Continue.dev tool availability)
+    if has_tools:
+        tool_names = [t.get("function", {}).get("name", "?") for t in (body.tools or [])]
+        log.info("REQUEST_TOOLS: %d tools = %s", len(tool_names), tool_names)
+    if has_tool_context:
+        recent_tool_msg = next(
+            (m for m in reversed(body.messages) if m.role == "tool"),
+            None,
+        )
+        if recent_tool_msg:
+            log.info("REQUEST_TOOL_RESPONSE: name=%s", recent_tool_msg.name)
+
     # ---- Path 3: teach trigger detection (chat middleware) ----
     # If the user's last message contains a natural-language teach trigger
     # ("학습해", "저장해", "기억해", "@save", etc.), auto-ingest the content
