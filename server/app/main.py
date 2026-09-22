@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -77,6 +78,94 @@ def require_key(x_api_key: Annotated[str | None, Header()] = None) -> None:
 
 
 AuthDep = Depends(require_key)
+
+
+# ---------- helpers ----------
+
+# Tool-syntax leak sanitizer (Issue #23 follow-up).
+# Qwen 2.5 in tool mode occasionally returns proper tool_calls AND ALSO
+# duplicates the call as text in the content field (e.g. inside ```shell
+# code blocks). Continue.dev then renders the content block as "apply this
+# code to the active file", which fails with token-limit errors and
+# confuses the user. Strip these leaks when tool_calls are present.
+
+_TOOL_LEAK_PATTERNS = [
+    # ```lang\n...tool_name(...)...\n``` (any language, any tool name in call)
+    re.compile(
+        r"```[a-zA-Z0-9_+-]*\s*\n"       # opening fence with optional lang
+        r"[^`]*?"                          # content up to the tool call
+        r"{tool}\s*\(.*?"                 # tool_name(
+        r"\n```",                          # closing fence
+        re.DOTALL,
+    ),
+    # Bare `tool_name(...)` in backticks
+    re.compile(r"`{tool}\s*\([^`]*?\)`"),
+]
+
+# Textual patterns that ask the user to run a command themselves.
+_ASK_USER_PATTERNS = [
+    re.compile(r"이\s*명령어를?\s*실행[해하]"),
+    re.compile(r"이\s*명령어\s*를\s*실행"),
+    re.compile(r"직접\s*실행[해하]"),
+    re.compile(r"터미널[에서]\s*실행[해하]"),
+    re.compile(r"실행한\s*후\s*(?:결과를?\s*)?(?:알려|말씀)"),
+]
+
+
+def _sanitize_tool_syntax_leaks(resp: dict[str, Any]) -> dict[str, Any]:
+    """Strip tool-call syntax from content when tool_calls are already present.
+
+    When Qwen leaks tool syntax into both fields, Continue.dev treats the
+    content code block as "apply this to the active file" (see Issue #23
+    debugging). The tool_calls field is the source of truth; content should
+    be a short prose explanation only.
+    """
+    try:
+        message = resp["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return resp
+
+    tool_calls = message.get("tool_calls") or []
+    if not tool_calls:
+        return resp
+
+    content = message.get("content") or ""
+    if not content:
+        return resp
+
+    original_len = len(content)
+    tool_names = [
+        tc.get("function", {}).get("name", "")
+        for tc in tool_calls
+        if tc.get("function", {}).get("name")
+    ]
+
+    for tool_name in tool_names:
+        if not tool_name:
+            continue
+        escaped = re.escape(tool_name)
+        for pattern_tmpl in _TOOL_LEAK_PATTERNS:
+            # Rebuild the compiled pattern with the actual tool name
+            filled = re.compile(
+                pattern_tmpl.pattern.replace("{tool}", escaped),
+                pattern_tmpl.flags,
+            )
+            content = filled.sub("", content)
+
+    for pattern in _ASK_USER_PATTERNS:
+        content = pattern.sub("", content)
+
+    # Collapse blank lines that the removal left behind
+    content = re.sub(r"\n{3,}", "\n\n", content).strip()
+
+    if len(content) != original_len:
+        log.info(
+            "sanitized tool syntax leak: %d -> %d chars (tools=%s)",
+            original_len, len(content), tool_names,
+        )
+
+    resp["choices"][0]["message"]["content"] = content
+    return resp
 
 
 # ---------- health / stats ----------
@@ -392,7 +481,10 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
             temperature=body.temperature,
             max_tokens=body.max_tokens,
         )
-        content = guarded["choices"][0]["message"]["content"]
+        # Issue #23 follow-up: strip tool syntax leaks from content when
+        # tool_calls are present (Continue.dev would misrender them).
+        guarded = _sanitize_tool_syntax_leaks(guarded)
+        content = guarded["choices"][0]["message"]["content"] or ""
         model_name = guarded.get("model", body.model or settings.default_model)
         citations_data = None
         if should_inject_rag and hits:
@@ -449,6 +541,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         tools=body.tools,
         tool_choice=body.tool_choice,
     )
+    # Issue #23 follow-up: strip tool syntax leaks from content when
+    # tool_calls are present (Continue.dev would misrender them).
+    resp = _sanitize_tool_syntax_leaks(resp)
     # attach citations to response for clients that care
     if should_inject_rag and hits:
         citations_objs = rag._hits_to_citations(hits)
