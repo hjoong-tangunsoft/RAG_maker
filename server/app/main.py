@@ -337,7 +337,20 @@ async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any
         # Tool mode or rag=false: preserve tool_calls / tool_call_id / name
         # by using model_dump(exclude_none=True) instead of pulling only
         # role+content (which would drop the tool-calling fields).
-        messages_out = [m.model_dump(exclude_none=True) for m in body.messages]
+        preserved = [m.model_dump(exclude_none=True) for m in body.messages]
+
+        # Issue #23 Phase 1 follow-up: inject tool_mode_system_prompt so
+        # Agent-mode responses still get Korean-only + IDE-style project
+        # tree formatting. Merge with any client-supplied system messages:
+        # our prompt takes precedence (first system slot), client systems
+        # follow as subordinate context.
+        if has_tools or has_tool_context:
+            client_systems = [m for m in preserved if m.get("role") == "system"]
+            non_system = [m for m in preserved if m.get("role") != "system"]
+            tool_sys = {"role": "system", "content": settings.tool_mode_system_prompt}
+            messages_out = [tool_sys] + client_systems + non_system
+        else:
+            messages_out = preserved
 
     if body.stream:
         # Phase F (Issue #23): tool-calling mode streams tool_calls chunks
