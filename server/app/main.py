@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import embed, ingest, llm, rag
+from .ontology.router import router as ontology_router
 from .chunker import chunk_text
 from .config import settings
 from .schemas import (
@@ -60,6 +61,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="RAG service", version="1.0.0", lifespan=lifespan)
+app.include_router(ontology_router)
 
 
 # ---------- auth dependency ----------
