@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from . import actions, db, seed
+from . import actions, agent, db, seed
 from .models import (
     Contract,
     Customer,
@@ -108,3 +108,26 @@ def action_draft_plan(body: DraftPlanRequest) -> ResponsePlan:
         return actions.draft_response_plan(body.customer_id)
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+
+
+# ---------- agent (LLM + tool calling over ontology) ----------
+
+class AgentChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    system_prompt: str | None = None
+    model: str | None = None
+    max_iterations: int = Field(default=5, ge=1, le=10)
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1024, ge=16, le=8192)
+
+
+@router.post("/agent/chat")
+async def agent_chat(body: AgentChatRequest) -> dict:
+    return await agent.run(
+        user_message=body.message,
+        system_prompt=body.system_prompt,
+        model=body.model,
+        max_iterations=body.max_iterations,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
+    )
