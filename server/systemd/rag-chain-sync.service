@@ -1,0 +1,33 @@
+# /etc/systemd/system/rag-chain-sync.service
+# Runs Jira export -> RAG ingest sync as a single oneshot chain.
+# Type=oneshot with multiple ExecStart lines runs them sequentially;
+# if any step fails, the service reports failure.
+#
+# Used by rag-chain-sync.timer for business-hours frequent updates.
+# Complements the existing daily jira-export.timer + rag-sync.timer.
+[Unit]
+Description=RAG chain: Jira export -> ingest sync (business hours frequent)
+Documentation=https://github.com/hjoong-tangunsoft/RAG_maker/blob/RAG_maker/docs/DESIGN_PRINCIPLES.md
+After=network-online.target rag.service
+Wants=network-online.target
+Requires=rag.service
+
+[Service]
+Type=oneshot
+User=rocky
+Group=rocky
+WorkingDirectory=/upload/rag
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/upload/rag/scripts
+Environment=POOL_DIR=/upload/rag/data/docs-pool
+Environment=STATE_FILE=/upload/rag/data/sync-state.json
+Environment=RAG_URL=http://127.0.0.1:8100
+Environment=DAILY_LIMIT=2
+EnvironmentFile=/upload/rag/jira.env
+ExecStart=/upload/rag/venv/bin/python3 -m exporters.jira_export
+ExecStart=/usr/local/bin/rag-ingest sync
+StandardOutput=journal
+StandardError=journal
+CPUQuota=200%
+MemoryMax=1G
+TimeoutStartSec=600

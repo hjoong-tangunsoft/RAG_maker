@@ -1,6 +1,8 @@
 """FastAPI application: RAG endpoints + OpenAI-compatible passthrough."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
@@ -23,8 +25,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import embed, ingest, llm, rag
+from .ontology.router import router as ontology_router
 from .chunker import chunk_text
 from .config import settings
+from .jira_meta import parse_jira_metadata
 from .schemas import (
     ChatCompletionRequest,
     DocInfo,
@@ -37,6 +41,8 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     StatsResponse,
+    TeachRequest,
+    TeachResponse,
 )
 from .store import get_store
 
@@ -45,6 +51,16 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 log = logging.getLogger("rag")
+
+# Silence known-benign Chroma noise:
+# - local_persistent_hnsw "Add of existing embedding ID" fires on every query
+#   that touches IDs which were double-persisted at ingest time. It's a data
+#   artefact from a past double-add of pool-jira-MAN-0198/0199, not a bug in
+#   the query path, and does not affect retrieval.
+# - product.posthog "capture() takes 1 positional argument but 3 were given"
+#   is a Chroma <-> posthog SDK mismatch; telemetry we don't want anyway.
+logging.getLogger("chromadb.segment.impl.vector.local_persistent_hnsw").setLevel(logging.ERROR)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
 
 @asynccontextmanager
@@ -60,6 +76,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="RAG service", version="1.0.0", lifespan=lifespan)
+app.include_router(ontology_router)
 
 
 # ---------- auth dependency ----------
@@ -118,6 +135,14 @@ async def delete_doc(doc_id: str) -> dict[str, Any]:
 # ---------- ingestion ----------
 
 def _index(text: str, source: str, doc_id: str | None, metadata: dict[str, Any]) -> IngestResponse:
+    # Phase D-1: auto-extract structured Jira metadata from exporter output
+    # so retrieval can filter by status (skip completed) and sort by recency.
+    # Non-Jira documents return None and pass through unchanged.
+    if jira_meta := parse_jira_metadata(text):
+        # Merge Jira fields first, then client-supplied metadata overrides.
+        # This preserves explicit caller intent while filling gaps automatically.
+        metadata = {**jira_meta, **metadata}
+
     chunks = chunk_text(text)
     if not chunks:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no content after chunking")
@@ -168,6 +193,38 @@ async def ingest_url(body: IngestURLRequest) -> IngestResponse:
     return _index(text, label, body.doc_id, {"url": body.url, **body.metadata})
 
 
+@app.post("/rag/teach", dependencies=[AuthDep])
+async def teach_endpoint(body: TeachRequest) -> TeachResponse:
+    """Explicit teach endpoint (Path 3, bypasses natural-language trigger).
+
+    Same underlying storage as chat trigger. Tagged with
+    strategy='explicit-api' so admin queries can filter it separately from
+    both chat-teach and batch ingest.
+    """
+    from . import teach as _teach
+    try:
+        result = _teach.auto_ingest(
+            content=body.content,
+            trigger="explicit-api",
+            strategy="explicit-api",
+            source_override=body.source,
+            metadata_override={
+                "explicit_teach": True,
+                **(body.metadata or {}),
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    return TeachResponse(
+        doc_id=result["doc_id"],
+        chunks=result["chunks"],
+        bytes=result["bytes"],
+        source=result["source"],
+        strategy=result["strategy"],
+        trigger=result["trigger"],
+    )
+
+
 # ---------- retrieval ----------
 
 @app.post("/rag/search", dependencies=[AuthDep])
@@ -212,38 +269,188 @@ async def models() -> Any:
 
 @app.post("/rag/v1/chat/completions", dependencies=[AuthDep])
 async def chat_completions(body: ChatCompletionRequest, request: Request) -> Any:
-    # If rag=false, straight passthrough
-    messages_out: list[dict[str, str]]
+    # ---- Phase F (Issue #23): detect tool-calling mode ----
+    # When the client provides `tools` or the message history contains
+    # tool_calls / tool responses (Continue.dev agent mode), skip both the
+    # teach trigger and RAG injection - the client is managing context via
+    # tools. Otherwise fall through to the existing RAG + teach pipeline.
+    has_tools = bool(body.tools)
+    has_tool_context = any(
+        (m.tool_calls or m.tool_call_id or m.role == "tool")
+        for m in body.messages
+    )
+    should_inject_rag = body.rag and not has_tools and not has_tool_context
+
+    # ---- Path 3: teach trigger detection (chat middleware) ----
+    # If the user's last message contains a natural-language teach trigger
+    # ("학습해", "저장해", "기억해", "@save", etc.), auto-ingest the content
+    # and return a confirmation instead of running normal RAG.
+    if should_inject_rag and body.messages:
+        from . import teach as _teach
+
+        last_user_msg = next(
+            (m for m in reversed(body.messages) if m.role == "user"),
+            None,
+        )
+        if last_user_msg:
+            trigger = _teach.detect_teach_trigger(last_user_msg.content)
+            if trigger:
+                try:
+                    content, strategy = _teach.extract_teachable_content(
+                        current_msg=last_user_msg.content,
+                        trigger=trigger,
+                        prev_assistant_msg=_teach.find_prev_assistant(body.messages),
+                    )
+                    result = _teach.auto_ingest(
+                        content=content,
+                        trigger=trigger,
+                        strategy=strategy,
+                    )
+                    confirmation = _teach.format_confirmation_message(result, content)
+                    return JSONResponse({
+                        "id": f"chatcmpl-teach-{result['doc_id'][-8:]}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": body.model or settings.default_model,
+                        "choices": [{
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": confirmation,
+                            },
+                        }],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                        "teach": result,
+                    })
+                except ValueError as e:
+                    # Trigger detected but no content extractable - most
+                    # likely a false positive. Fall through to normal RAG.
+                    log.info("teach trigger detected but extraction failed: %s", e)
+
+    # RAG injection - skipped in tool-calling mode per Phase F above.
+    messages_out: list[dict[str, Any]]
     hits: list[dict[str, Any]] = []
-    if body.rag:
+    if should_inject_rag:
         # find the last user message to use as the retrieval query
-        last_user = next((m.content for m in reversed(body.messages) if m.role == "user"), None)
+        last_user = next(
+            (m.content for m in reversed(body.messages)
+             if m.role == "user" and m.content),
+            None,
+        )
         if last_user:
             hits = rag.retrieve(last_user, k=body.rag_k, where=body.rag_filter)
         messages_out = rag.inject_rag_into_chat(body.messages, hits)
     else:
-        messages_out = [{"role": m.role, "content": m.content} for m in body.messages]
+        # Tool mode or rag=false: preserve tool_calls / tool_call_id / name
+        # by using model_dump(exclude_none=True) instead of pulling only
+        # role+content (which would drop the tool-calling fields).
+        messages_out = [m.model_dump(exclude_none=True) for m in body.messages]
 
     if body.stream:
+        # Phase F (Issue #23): tool-calling mode streams tool_calls chunks
+        # directly per OpenAI spec. The hanja buffer would break tool_call
+        # streaming (which is structured JSON, not natural text) - safe to
+        # skip because tool responses aren't Korean prose.
+        if has_tools:
+            async def gen_tools():
+                async for chunk in llm.stream_chat(
+                    messages_out,
+                    model=body.model,
+                    temperature=body.temperature,
+                    max_tokens=body.max_tokens,
+                    tools=body.tools,
+                    tool_choice=body.tool_choice,
+                ):
+                    yield chunk
+            return StreamingResponse(gen_tools(), media_type="text/event-stream")
+
+        # Phase E-1: buffer through chat_guarded then emit as fake SSE chunks.
+        # Real streaming from stream_chat() bypasses the hanja guard because
+        # mid-stream retry is impossible; buffering trades realtime UX for
+        # 100% Korean-only guarantee (see Notion blog for rationale).
+        guarded = await llm.chat_guarded(
+            messages_out,
+            model=body.model,
+            temperature=body.temperature,
+            max_tokens=body.max_tokens,
+        )
+        content = guarded["choices"][0]["message"]["content"]
+        model_name = guarded.get("model", body.model or settings.default_model)
+        citations_data = None
+        if should_inject_rag and hits:
+            citations_objs = rag._hits_to_citations(hits)
+            citations_data = [c.model_dump() for c in citations_objs]
+            # Issue #9 Option A: fold citations into body so Continue-style
+            # clients that ignore the extra `citations` field still see sources.
+            # Appended BEFORE chunking so the footer streams naturally as text.
+            if settings.append_citations_to_body:
+                content = content + rag.format_citations_footer(citations_objs)
+
         async def gen():
-            async for chunk in llm.stream_chat(
-                messages_out,
-                model=body.model,
-                temperature=body.temperature,
-                max_tokens=body.max_tokens,
-            ):
-                yield chunk
+            chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            created = int(time.time())
+            chunk_size = 40  # small chunks feel more like real streaming
+            for i in range(0, len(content), chunk_size):
+                piece = content[i:i + chunk_size]
+                chunk = {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": piece},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                await asyncio.sleep(0.02)
+            final = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }],
+            }
+            if citations_data:
+                final["citations"] = citations_data
+            yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    resp = await llm.chat(
+    resp = await llm.chat_guarded(
         messages_out,
         model=body.model,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
+        tools=body.tools,
+        tool_choice=body.tool_choice,
     )
     # attach citations to response for clients that care
-    if body.rag and hits:
-        resp["citations"] = [c.model_dump() for c in rag._hits_to_citations(hits)]
+    if should_inject_rag and hits:
+        citations_objs = rag._hits_to_citations(hits)
+        resp["citations"] = [c.model_dump() for c in citations_objs]
+        # Issue #9 Option A: also fold into body for clients that ignore
+        # the extra `citations` field (e.g. Continue.dev).
+        if settings.append_citations_to_body:
+            try:
+                resp["choices"][0]["message"]["content"] = (
+                    resp["choices"][0]["message"]["content"]
+                    + rag.format_citations_footer(citations_objs)
+                )
+            except (KeyError, IndexError, TypeError):
+                # Non-standard shape - skip footer, keep raw response
+                log.warning("could not append citations footer: unexpected response shape")
     return JSONResponse(resp)
 
 

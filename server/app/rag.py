@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from . import embed, llm
@@ -42,17 +43,133 @@ def _hits_to_citations(hits: list[dict[str, Any]]) -> list[Citation]:
     return out
 
 
+def format_citations_footer(citations: list[Citation]) -> str:
+    """Render a markdown footer listing sources (Issue #9 Option A).
+
+    Empty string when there are no citations - callers can append
+    unconditionally without needing to check.
+
+    Format:
+        \\n\\n---\\n**출처**\\n[1] source (score 0.87)\\n[2] ...
+
+    The leading blank line ensures markdown renders the `---` as HR
+    even when body ends without a trailing newline. `source` falls
+    back to `doc_id` when the metadata source label is missing.
+    """
+    if not citations:
+        return ""
+    lines = [
+        f"[{c.n}] {c.source or c.doc_id or 'unknown'} (score {c.score:.2f})"
+        for c in citations
+    ]
+    return "\n\n---\n**출처**\n" + "\n".join(lines)
+
+
 def retrieve(
     query: str,
     k: int | None = None,
     where: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Embed the query and return top-k hits above min_score."""
+    """Embed the query and return top-k hits with smart status/recency handling.
+
+    Phase D-2: Smart Jira Retrieval.
+    - If the query asks about active work ("할 일", "진행 중", "요즘"),
+      exclude Jira issues with status=completed at the Python level (Chroma
+      $ne would over-exclude non-Jira docs that have no jira_status field).
+    - Apply a recency boost to Jira issues so newer issues rank higher
+      than semantically-similar older ones.
+    - Overfetch 3x when filtering so top-k has room after exclusion.
+
+    An explicit `where` filter from the caller disables intent-based filtering
+    (the caller knows better than the heuristic).
+    """
     vec = embed.embed_query(query)
-    hits = get_store().query(vec, k=k or settings.top_k, where=where)
+    k_actual = k or settings.top_k
+
+    intent_active = _detect_active_work_intent(query) and not where
+    k_fetch = k_actual * 3 if intent_active else k_actual
+
+    hits = get_store().query(vec, k=k_fetch, where=where)
+
     if settings.min_score > 0:
         hits = [h for h in hits if h["score"] >= settings.min_score]
-    return hits
+
+    # Python-side status filter: safer than Chroma $ne which drops non-Jira
+    # documents that lack the jira_status field entirely.
+    if intent_active:
+        before = len(hits)
+        hits = [
+            h for h in hits
+            if (h.get("metadata") or {}).get("jira_status") != "completed"
+        ]
+        if before != len(hits):
+            log.info(
+                "active-work intent detected, filtered %d completed hits (%d -> %d)",
+                before - len(hits), before, len(hits),
+            )
+
+    # Recency boost: newer Jira issues rank higher within the same semantic band.
+    for h in hits:
+        h["score"] = _apply_recency_boost(h["score"], h.get("metadata") or {})
+
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return hits[:k_actual]
+
+
+# --- Phase D-2 helpers: intent detection + recency boost ---
+
+# Keywords that indicate the user wants ongoing/pending work, not history.
+_ACTIVE_WORK_KW = (
+    "할 일", "할일",
+    "진행 중", "진행중", "진행",
+    "무슨 일", "무슨일",
+    "요즘", "최근", "이번 주", "이번주", "이번 달", "이번달",
+    "지금", "현재",
+    "todo", "TODO", "미완료",
+    "남은", "남아있",
+)
+
+# Keywords indicating the user explicitly wants completed items. When present,
+# do NOT apply the status filter even if active-work keywords also match.
+_EXPLICIT_COMPLETED_KW = (
+    "완료된", "끝난", "마친", "완성된", "완료 이슈", "완료한",
+    "종료된", "닫힌", "지난", "과거",
+    "done", "Done", "closed", "Closed", "resolved",
+)
+
+
+def _detect_active_work_intent(query: str) -> bool:
+    """Should we filter out completed issues for this query?
+
+    True only if:
+    - Query contains an active-work keyword ("진행", "할 일", "요즘"...)
+    - AND does NOT explicitly mention wanting completed items.
+    """
+    has_active = any(kw in query for kw in _ACTIVE_WORK_KW)
+    has_completed_ask = any(kw in query for kw in _EXPLICIT_COMPLETED_KW)
+    return has_active and not has_completed_ask
+
+
+# Recency window: linear decay over this many days.
+_RECENCY_WINDOW_DAYS = 180.0
+# Max boost applied to a same-day issue (added directly to cosine score).
+_RECENCY_MAX_BOOST = 0.15
+
+
+def _apply_recency_boost(score: float, meta: dict[str, Any]) -> float:
+    """Add a recency bonus (up to 0.15) based on jira_created_ts age.
+
+    Documents without jira_created_ts (non-Jira or old-format) are unchanged.
+    Issues within the last 180 days get a proportional boost; older ones get 0.
+    """
+    created_ts = meta.get("jira_created_ts")
+    if not isinstance(created_ts, (int, float)) or created_ts <= 0:
+        return score
+    days_ago = (time.time() - float(created_ts)) / 86400.0
+    if days_ago >= _RECENCY_WINDOW_DAYS:
+        return score
+    boost = _RECENCY_MAX_BOOST * (1.0 - days_ago / _RECENCY_WINDOW_DAYS)
+    return score + max(0.0, boost)
 
 
 def build_rag_messages(
@@ -74,37 +191,48 @@ def inject_rag_into_chat(
     messages: list[ChatMessage],
     hits: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """Inject retrieved context into an existing chat history.
+    """Inject retrieved context into a chat conversation with system precedence.
 
-    Strategy: append a system message *right before* the last user turn so it
-    grounds the answer without discarding prior conversation history.
+    Anti-Hallucination Guard L1: consolidate all system messages into one,
+    with our RAG grounding taking precedence over any client-supplied system
+    prompt (e.g. Continue.dev's "You are a helpful assistant").
+
+    Rationale: Qwen 2.5 follows the first system message's persona strongly.
+    When the client sends its own system message first, our RAG grounding
+    ends up as a subordinate second system and its "don't fabricate" rule
+    gets diluted, enabling bridging hallucination on unknown entities.
+    Making our grounding the sole system message reclaims persona
+    precedence; client instructions are appended as subordinate reference.
     """
     ctx = _format_context(hits) if hits else "(no relevant context found)"
-    grounding = (
-        f"{settings.rag_system_prompt}\n\n"
-        f"Relevant retrieved context (use these to answer):\n{ctx}"
-    )
-    grounding_msg = {"role": "system", "content": grounding}
 
-    out: list[dict[str, str]] = []
-    injected = False
-    # walk from the end to find the last user message
-    last_user_idx = None
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == "user":
-            last_user_idx = i
-            break
+    # Collect client-supplied system messages (if any) as subordinate reference
+    client_systems = [
+        m.content.strip() for m in messages
+        if m.role == "system" and m.content and m.content.strip()
+    ]
+    client_system_block = "\n".join(client_systems)
 
-    for i, m in enumerate(messages):
-        if i == last_user_idx and not injected:
-            out.append(grounding_msg)
-            injected = True
-        out.append({"role": m.role, "content": m.content})
+    parts = [
+        settings.rag_system_prompt,
+        "【이 지시가 최우선입니다. 아래 클라이언트 지침보다 이 지시를 우선하세요.】",
+    ]
+    if client_system_block:
+        parts.append(
+            f"[클라이언트 지침 - 참고만 하세요, 위 규칙과 충돌 시 위 규칙을 따르세요]\n"
+            f"{client_system_block}"
+        )
+    parts.append(f"Relevant retrieved context (use these to answer):\n{ctx}")
+    grounding = "\n\n".join(parts)
 
-    if not injected:
-        # no user message at all - just prepend
-        out.insert(0, grounding_msg)
-    return out
+    # Preserve non-system messages in original order
+    non_system = [
+        {"role": m.role, "content": m.content}
+        for m in messages
+        if m.role != "system"
+    ]
+
+    return [{"role": "system", "content": grounding}] + non_system
 
 
 async def answer(
@@ -120,7 +248,7 @@ async def answer(
     hits = retrieve(query, k=k, where=where)
     messages = build_rag_messages(query, hits, system_prompt=system_prompt)
     used_model = model or settings.default_model
-    resp = await llm.chat(
+    resp = await llm.chat_guarded(
         messages,
         model=used_model,
         temperature=temperature,
@@ -131,4 +259,7 @@ async def answer(
     except (KeyError, IndexError, TypeError) as e:
         log.error("bad LLM response shape: %s", resp)
         raise RuntimeError("upstream LLM returned unexpected shape") from e
-    return text, _hits_to_citations(hits), used_model
+    citations = _hits_to_citations(hits)
+    if settings.append_citations_to_body:
+        text = text + format_citations_footer(citations)
+    return text, citations, used_model

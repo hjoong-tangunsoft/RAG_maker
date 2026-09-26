@@ -1,0 +1,16 @@
+# /etc/systemd/system/jira-export.timer
+# Runs jira-export.service daily at 02:45 KST — 15 minutes BEFORE
+# rag-sync.timer (03:00) so freshly-exported markdown files are ready
+# when the sync client scans the pool.
+[Unit]
+Description=Daily Jira export timer
+Documentation=https://github.com/hjoong-tangunsoft/RAG_maker/blob/RAG_maker/docs/DESIGN_PRINCIPLES.md
+
+[Timer]
+OnCalendar=*-*-* 02:45:00
+Persistent=true
+RandomizedDelaySec=180
+Unit=jira-export.service
+
+[Install]
+WantedBy=timers.target
