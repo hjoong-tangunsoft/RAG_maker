@@ -174,5 +174,4 @@ Ontology Agent / RAG 파이프라인에서 발견된 버그를 시간순으로 �
 
 ## 미결/추적 중
 
-- **툴 커버리지 갭** (버그는 아니지만 회귀 대상): `list_customer_contracts`, `list_customers` 미구현. 현재는 #9 정직한 refusal로 처리 중. 티켓화 예정.
 - **모델 의미 한계** (infra 버그 아님, 추적만): F3 두 번 연속 subject 교체 시 wiki 정의로 폴백, MongoDB 등 미등록 벤더에 대해 "위험 없음" 오답. LiteLLM intent-router (#37) 도입 후 재평가.
