@@ -246,18 +246,24 @@ async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | N
     async def on_event(evt: dict) -> None:
         t = evt.get("type")
         if t == "thinking":
-            await queue.put(f"\n**[반복 {evt['iteration']}]** LLM 판단 중...\n")
+            it = evt["iteration"]
+            msg = (
+                "사용자 질문을 분석하고 있습니다..."
+                if it == 1
+                else f"이전 결과를 바탕으로 다음 단계를 판단하고 있습니다... (반복 {it})"
+            )
+            await queue.put(f"\n{msg}\n")
         elif t == "tool_call":
             await queue.put(
-                f"\n**도구 호출**: `{evt['name']}`\n\n"
-                f"```json\n{evt['arguments']}\n```\n"
+                f"\n{evt['narration']}\n\n"
+                f"<details><summary>호출 인자 원본</summary>\n\n"
+                f"```json\n{evt['arguments']}\n```\n\n</details>\n"
             )
         elif t == "tool_result":
-            preview = evt.get("preview", "")
             await queue.put(
-                f"**결과 요약**: {evt['summary']}\n\n"
-                f"<details><summary>원시 결과 보기</summary>\n\n"
-                f"```json\n{preview}\n```\n\n</details>\n\n"
+                f"\n{evt['narration']}\n\n"
+                f"<details><summary>결과 원본</summary>\n\n"
+                f"```json\n{evt.get('preview', '')}\n```\n\n</details>\n"
             )
 
     async def run_agent():
