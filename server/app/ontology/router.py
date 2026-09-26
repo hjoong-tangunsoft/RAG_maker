@@ -267,7 +267,12 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
 
     async def on_event(evt: dict) -> None:
         t = evt.get("type")
-        if t == "thinking":
+        if t == "rewrite":
+            await queue.put(
+                f"\n> _이전 대화 맥락을 반영해 질문을 재구성했습니다: "
+                f"**{evt['rewritten']}**_\n\n"
+            )
+        elif t == "thinking":
             it = evt["iteration"]
             msg = (
                 "> _사용자 질문을 분석하고 있습니다..._"

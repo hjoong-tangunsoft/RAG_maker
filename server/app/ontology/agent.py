@@ -39,16 +39,12 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If you lack the info and no tool can help, say so briefly. Do not "
     "propose external actions.\n\n"
     "CONVERSATION CONTEXT (IMPORTANT):\n"
-    "Short follow-ups from the user MUST be interpreted as continuing the "
-    "topic of the previous turn. Examples:\n"
-    "- Previous turn was about 'JetBrains 갱신 위험 고객'. User then says "
-    "'깃허브는?' -> interpret as 'GitHub 갱신 위험 고객은?' and you MUST call "
-    "the same tool again with vendor_name='GitHub'. Never answer from prior "
-    "turn's memory - always re-query the tool for the new vendor/subject.\n"
-    "- User says '그럼 LG는?' -> interpret as continuation about LG in the "
-    "same context and re-run the appropriate tool.\n"
-    "Never treat a short follow-up as a brand-new definition request. "
-    "Never skip the tool call just because the topic feels familiar.\n\n"
+    "The user message you receive has ALREADY been rewritten to be "
+    "self-contained using prior conversation context. Treat it as a "
+    "complete standalone question and choose tools accordingly. If it "
+    "refers to a vendor/customer/subject, that subject is the current "
+    "target - use the appropriate tool with those parameters. Never skip "
+    "a tool call because the topic feels familiar from earlier turns.\n\n"
     "LANGUAGE POLICY (STRICT, NON-NEGOTIABLE):\n"
     "1) Detect the user's language from their message.\n"
     "2) Your ENTIRE final answer MUST be in that single language.\n"
@@ -63,6 +59,64 @@ DEFAULT_SYSTEM_PROMPT = (
 
 def _has_hangul(text: str) -> bool:
     return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+
+
+_REWRITE_SYSTEM = (
+    "You rewrite the user's latest message into a single self-contained "
+    "question using the prior conversation as context. Rules:\n"
+    "1) Output ONLY the rewritten question. No prefix, no quotes, no "
+    "explanation.\n"
+    "2) Resolve every pronoun, ellipsis, and short follow-up (e.g. '깃허브는?', "
+    "'그럼 LG는?', 'and github?') into an explicit question that copies the "
+    "structure and intent of the prior turn but swaps in the new subject.\n"
+    "3) Preserve the user's original language.\n"
+    "4) If the latest message is already self-contained, return it unchanged.\n"
+    "5) Never add information not implied by the prior turns."
+)
+
+
+async def _rewrite_query(history: list[dict[str, Any]], last_user: str) -> str:
+    """Rewrite a possibly-ambiguous follow-up into a self-contained question.
+
+    Uses the LLM itself so the resolution generalizes across any topic/vendor
+    without hardcoded examples. Pass-through when the message is already
+    self-contained or when there is no prior conversation.
+    """
+    # need at least one prior turn (user or assistant) before the last user msg
+    prior = history[:-1]
+    if not prior or not last_user.strip():
+        return last_user
+    convo_lines = [
+        f"{m.get('role','?')}: {(m.get('content') or '').strip()}"
+        for m in prior
+        if m.get("content")
+    ]
+    if not convo_lines:
+        return last_user
+    prompt = (
+        "Prior conversation:\n"
+        + "\n".join(convo_lines)
+        + f"\n\nLatest user message: {last_user}\n\nRewritten self-contained question:"
+    )
+    try:
+        resp = await llm.chat(
+            messages=[
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=200,
+        )
+        text = (resp["choices"][0]["message"].get("content") or "").strip()
+        # strip common wrappers a small model likes to add
+        for prefix in ("Rewritten:", "rewritten:", "Question:", "질문:"):
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+        text = text.strip('"').strip("'").strip()
+        return text or last_user
+    except Exception as e:  # noqa: BLE001
+        log.warning("query rewrite failed, falling back to raw: %s", e)
+        return last_user
 
 
 class AgentTrace(dict[str, Any]):
@@ -99,15 +153,21 @@ async def run(
         "",
     )
 
+    rewritten = await _rewrite_query(history, last_user)
+    if rewritten != last_user and on_event:
+        await on_event({"type": "rewrite", "original": last_user, "rewritten": rewritten})
+
     base_system = system_prompt or DEFAULT_SYSTEM_PROMPT
-    if _has_hangul(last_user or ""):
+    if _has_hangul(rewritten or ""):
         base_system += (
             "\n\nCONFIRMED USER LANGUAGE: Korean. "
             "Your final answer MUST be entirely in Korean. No English sentences."
         )
+    # rewritten query is self-contained: drop history to keep the agent
+    # loop focused and avoid the model mimicking prior assistant prose
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": base_system},
-        *history,
+        {"role": "user", "content": rewritten},
     ]
     tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
