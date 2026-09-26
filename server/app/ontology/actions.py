@@ -11,7 +11,11 @@ from datetime import date, datetime, timedelta
 from . import db
 from .models import (
     Contract,
+    ContractDetail,
     Customer,
+    CustomerContractsReport,
+    CustomerListItem,
+    CustomerListReport,
     Product,
     RenewalRiskItem,
     RenewalRiskReport,
@@ -154,4 +158,120 @@ def draft_response_plan(customer_id: str) -> ResponsePlan:
         generated_at=datetime.now(),
         summary="\n".join(lines),
         actions=actions,
+    )
+
+
+def list_customers(*, vendor_name: str | None = None) -> CustomerListReport:
+    """List all customers, optionally filtered by a vendor they hold a contract with.
+
+    Closes the G1 coverage gap: "고객 전체 몇 개 있어?" now returns a real
+    answer instead of #9's honest-refusal fallback.
+    """
+    sql = """
+    SELECT
+        cu.id AS customer_id, cu.name AS customer_name, cu.industry,
+        (SELECT COUNT(*) FROM contract c2 WHERE c2.customer_id = cu.id) AS contract_count,
+        (SELECT GROUP_CONCAT(DISTINCT v.name) FROM contract c3
+           JOIN product p ON p.id = c3.product_id
+           JOIN vendor v ON v.id = p.vendor_id
+          WHERE c3.customer_id = cu.id) AS vendors_csv
+    FROM customer cu
+    """
+    params: list[str] = []
+    if vendor_name:
+        sql += (
+            " WHERE cu.id IN (SELECT c.customer_id FROM contract c "
+            " JOIN product p ON p.id = c.product_id "
+            " JOIN vendor v ON v.id = p.vendor_id "
+            " WHERE v.name = ?)"
+        )
+        params.append(vendor_name)
+    sql += " ORDER BY cu.name ASC"
+
+    items: list[CustomerListItem] = []
+    with db.connect() as conn:
+        for r in conn.execute(sql, params).fetchall():
+            vendors = [v for v in (r["vendors_csv"] or "").split(",") if v]
+            items.append(CustomerListItem(
+                customer=Customer(
+                    id=r["customer_id"],
+                    name=r["customer_name"],
+                    industry=r["industry"],
+                ),
+                contract_count=r["contract_count"],
+                active_vendors=vendors,
+            ))
+
+    return CustomerListReport(
+        generated_at=datetime.now(),
+        filter={"vendor": vendor_name or "*"},
+        items=items,
+    )
+
+
+def list_customer_contracts(
+    *,
+    customer_id: str | None = None,
+    customer_name: str | None = None,
+) -> CustomerContractsReport:
+    """List all contracts for a single customer (product + vendor + days-to-renewal).
+
+    Closes the G2 coverage gap. Accepts either id ('c_samsung') or name
+    ('삼성전자') because the LLM often knows the display name but not our
+    internal id convention.
+    """
+    if not customer_id and not customer_name:
+        raise ValueError("customer_id or customer_name is required")
+    today = date.today()
+    with db.connect() as conn:
+        if customer_id:
+            cust = conn.execute(
+                "SELECT * FROM customer WHERE id=?", (customer_id,),
+            ).fetchone()
+        else:
+            cust = conn.execute(
+                "SELECT * FROM customer WHERE name=?", (customer_name,),
+            ).fetchone()
+            if cust is None:
+                cust = conn.execute(
+                    "SELECT * FROM customer WHERE name LIKE ? LIMIT 1",
+                    (f"%{customer_name}%",),
+                ).fetchone()
+        if cust is None:
+            key = customer_id or customer_name
+            raise ValueError(f"customer not found: {key}")
+
+        rows = conn.execute(
+            "SELECT c.*, p.id AS product_id, p.name AS product_name, "
+            "  v.id AS vendor_id, v.name AS vendor_name "
+            "FROM contract c "
+            "JOIN product p ON p.id = c.product_id "
+            "JOIN vendor v ON v.id = p.vendor_id "
+            "WHERE c.customer_id = ? "
+            "ORDER BY c.renewal_date ASC",
+            (cust["id"],),
+        ).fetchall()
+
+    items: list[ContractDetail] = []
+    for r in rows:
+        renewal = date.fromisoformat(r["renewal_date"])
+        items.append(ContractDetail(
+            contract=Contract(
+                id=r["id"], customer_id=r["customer_id"], product_id=r["product_id"],
+                start_date=date.fromisoformat(r["start_date"]),
+                renewal_date=renewal, seats=r["seats"], amount_krw=r["amount_krw"],
+            ),
+            product=Product(
+                id=r["product_id"], name=r["product_name"], vendor_id=r["vendor_id"],
+            ),
+            vendor=Vendor(id=r["vendor_id"], name=r["vendor_name"]),
+            days_until_renewal=(renewal - today).days,
+        ))
+
+    return CustomerContractsReport(
+        customer=Customer(
+            id=cust["id"], name=cust["name"], industry=cust["industry"],
+        ),
+        generated_at=datetime.now(),
+        items=items,
     )
