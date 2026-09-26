@@ -27,11 +27,20 @@ DEFAULT_SYSTEM_PROMPT = (
     "business ontology through tools: customers, contracts, licenses, support "
     "tickets, and vendors are all queryable. When the user asks about renewals, "
     "at-risk customers, or response plans, USE THE TOOLS - do not guess. "
-    "LANGUAGE POLICY (STRICT): detect the user's language and answer ONLY in that "
-    "single language. If the user writes in Korean, answer ONLY in Korean. "
-    "NEVER repeat the same answer in another language (especially Chinese). "
-    "NEVER append a translation. One answer, one language. Be concise and factual."
+    "LANGUAGE POLICY (STRICT, NON-NEGOTIABLE): "
+    "1) Detect the user's language from their message. "
+    "2) Your ENTIRE final answer MUST be in that single language. "
+    "3) If the user writes in Korean (한국어), answer ONLY in Korean. Do NOT write "
+    "any part of the answer in English or Chinese - not headings, not labels, "
+    "not field names, nothing. Translate technical terms into natural Korean. "
+    "4) NEVER repeat the same answer in another language. One answer, one language. "
+    "5) This rule overrides any tendency to default to English. "
+    "Be concise and factual."
 )
+
+
+def _has_hangul(text: str) -> bool:
+    return any("\uac00" <= ch <= "\ud7a3" for ch in text)
 
 
 class AgentTrace(dict[str, Any]):
@@ -53,8 +62,14 @@ async def run(
     on_event: optional async callback invoked at each tool_call and tool_result
     so a streaming client (SSE wrapper) can show progress in real time.
     """
+    base_system = system_prompt or DEFAULT_SYSTEM_PROMPT
+    if _has_hangul(user_message):
+        base_system += (
+            "\n\nCONFIRMED USER LANGUAGE: Korean. "
+            "Your final answer MUST be entirely in Korean. No English sentences."
+        )
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+        {"role": "system", "content": base_system},
         {"role": "user", "content": user_message},
     ]
     tool_calls_log: list[dict[str, Any]] = []
@@ -95,7 +110,12 @@ async def run(
                 await on_event({"type": "tool_call", "name": name, "arguments": args_json})
             result_json = tools.dispatch(name, args_json)
             if on_event:
-                await on_event({"type": "tool_result", "name": name, "summary": _summarize_result(result_json)})
+                await on_event({
+                    "type": "tool_result",
+                    "name": name,
+                    "summary": _summarize_result(result_json),
+                    "preview": result_json[:600],
+                })
             tool_calls_log.append({
                 "id": tc.get("id"),
                 "name": name,
@@ -130,6 +150,10 @@ def _summarize_result(result_json: str) -> str:
     if isinstance(data, list):
         return f"{len(data)}건"
     if isinstance(data, dict):
+        if "error" in data:
+            return f"에러: {data['error']}"
+        if "items" in data and isinstance(data["items"], list):
+            return f"{len(data['items'])}건"
         if "customers" in data and isinstance(data["customers"], list):
             return f"고객 {len(data['customers'])}건"
         if "contracts" in data and isinstance(data["contracts"], list):
