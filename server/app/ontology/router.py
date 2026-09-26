@@ -1,10 +1,12 @@
 """FastAPI router exposing ontology objects + actions."""
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import actions, agent, db, seed
@@ -152,13 +154,7 @@ class OAIChatRequest(BaseModel):
 
 
 @router.post("/v1/chat/completions")
-async def openai_chat_completions(body: OAIChatRequest) -> dict:
-    """Adapt the ontology agent to OpenAI Chat Completions shape.
-
-    Streaming is not implemented - returns the full response at once. Tool call
-    traces are embedded under a non-standard `ontology_trace` field so clients
-    that care can inspect them; Continue.dev ignores unknown fields.
-    """
+async def openai_chat_completions(body: OAIChatRequest):
     user_msgs = [m for m in body.messages if m.role == "user"]
     if not user_msgs:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "no user message")
@@ -168,8 +164,6 @@ async def openai_chat_completions(body: OAIChatRequest) -> dict:
 
     system_msg = next((m.content for m in body.messages if m.role == "system"), None)
 
-    # "ontology-agent" is our virtual external name; agent uses its default
-    # (real LiteLLM model) unless caller explicitly names a real model.
     real_model = None if (body.model or "").strip() in ("", "ontology-agent") else body.model
     trace = await agent.run(
         user_message=last_user,
@@ -178,11 +172,37 @@ async def openai_chat_completions(body: OAIChatRequest) -> dict:
         temperature=body.temperature if body.temperature is not None else 0.2,
         max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
     )
+    answer_text = trace.get("answer", "")
+    resp_id = f"chatcmpl-ont-{uuid.uuid4().hex[:16]}"
+    resp_model = trace.get("model") or body.model or "qwen2.5-7b"
+    created = int(time.time())
+
+    if body.stream:
+        # Continue.dev requires SSE. Agent runs to completion first, then we
+        # emit as a single delta chunk followed by the terminator - streaming
+        # per-token would require restructuring agent.run() to be a generator.
+        async def gen():
+            chunk1 = {
+                "id": resp_id, "object": "chat.completion.chunk",
+                "created": created, "model": resp_model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": answer_text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk1, ensure_ascii=False)}\n\n"
+            chunk2 = {
+                "id": resp_id, "object": "chat.completion.chunk",
+                "created": created, "model": resp_model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "ontology_trace": {"iterations": trace.get("iterations"), "tool_calls": trace.get("tool_calls", [])},
+            }
+            yield f"data: {json.dumps(chunk2, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
     return {
-        "id": f"chatcmpl-ont-{uuid.uuid4().hex[:16]}",
+        "id": resp_id,
         "object": "chat.completion",
-        "created": int(time.time()),
-        "model": trace.get("model") or body.model or "qwen2.5-7b",
+        "created": created,
+        "model": resp_model,
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": trace.get("answer", "")},
