@@ -28,9 +28,9 @@ RAG_maker 시스템을 구축하며 마주친 문제와 개념 오해→이해 �
 | [2026-09-03-anti-hallucination.md](2026-09-03-anti-hallucination.md) | 2 | draft | — |
 | [2026-09-03-smart-jira-retrieval.md](2026-09-03-smart-jira-retrieval.md) | 3 | draft | — |
 | [2026-09-03-zero-tolerance-hanja.md](2026-09-03-zero-tolerance-hanja.md) | 2 | draft | — |
-| [2026-09-27-litellm-vs-intent-router.md](2026-09-27-litellm-vs-intent-router.md) | 4 | seed | TBD |
-| [2026-09-27-routing-vs-intent-vs-toolcalling.md](2026-09-27-routing-vs-intent-vs-toolcalling.md) | 5 | seed | TBD |
-| [2026-09-27-classifier-same-model.md](2026-09-27-classifier-same-model.md) | 5 | seed | TBD |
+| [2026-09-27-litellm-vs-intent-router.md](2026-09-27-litellm-vs-intent-router.md) | 4 | seed | #39 |
+| [2026-09-27-routing-vs-intent-vs-toolcalling.md](2026-09-27-routing-vs-intent-vs-toolcalling.md) | 5 | seed | #40 |
+| [2026-09-27-classifier-same-model.md](2026-09-27-classifier-same-model.md) | 5 | seed | #41 |
 
 - **draft**: 초안 완성. 편집·확장 대상.
 - **seed**: 오해→이해 요지만 기록. 확장 필요.
