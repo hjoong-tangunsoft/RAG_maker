@@ -66,41 +66,51 @@ def _has_hangul(text: str) -> bool:
 
 
 _REWRITE_SYSTEM = (
-    "You rewrite the user's latest message into a single self-contained "
-    "question using the prior conversation as context. Rules:\n"
-    "1) Output ONLY the rewritten question. No prefix, no quotes, no "
+    "You rewrite the user's latest message ONLY IF it cannot stand alone. "
+    "Most messages are already self-contained and MUST be returned verbatim.\n\n"
+    "Rules:\n"
+    "1) Output ONLY the resulting question. No prefix, no quotes, no "
     "explanation.\n"
-    "2) Resolve every pronoun, ellipsis, and short follow-up (e.g. '깃허브는?', "
-    "'그럼 LG는?', 'and github?') into an explicit question that copies the "
-    "structure and intent of the prior turn but swaps in the new subject.\n"
-    "3) Preserve the user's original language.\n"
-    "4) If the latest message is already self-contained, return it unchanged.\n"
-    "5) Never add information not implied by the prior turns."
+    "2) Return the latest message UNCHANGED when it already contains its own "
+    "subject/verb and makes sense on its own. Examples that MUST pass through:\n"
+    "   - '갱신해야될 고객사 알려줘' (has subject '고객사' + verb '알려줘')\n"
+    "   - 'JetBrains 위험 고객 알려줘'\n"
+    "   - 'JIRA에 어떤 글들 있어?'\n"
+    "3) Rewrite ONLY when the latest message clearly depends on the previous "
+    "turn - pronouns, ellipsis, or bare noun phrases with no verb. Examples:\n"
+    "   - '깃허브는?' after a JetBrains question -> '깃허브 갱신 위험 고객은?'\n"
+    "   - '그럼 LG는?' -> resolve LG in the same context\n"
+    "   - '이유는?' -> 'why is that?' in the same context\n"
+    "4) NEVER inject a subject (vendor/name/entity) that is not present in "
+    "the latest message. If the latest message says 'all customers', do not "
+    "narrow it to one vendor from earlier turns.\n"
+    "5) Preserve the user's original language.\n"
+    "6) When in doubt, return unchanged."
 )
 
 
 async def _rewrite_query(history: list[dict[str, Any]], last_user: str) -> str:
-    """Rewrite a possibly-ambiguous follow-up into a self-contained question.
+    """Rewrite an ambiguous follow-up into a self-contained question.
 
-    Uses the LLM itself so the resolution generalizes across any topic/vendor
-    without hardcoded examples. Pass-through when the message is already
-    self-contained or when there is no prior conversation.
+    Only the immediately preceding 1-2 turns are used as context so a fresh
+    complete question later in the conversation does not get polluted by
+    stale subjects (e.g. GitHub from 10 turns ago).
     """
-    # need at least one prior turn (user or assistant) before the last user msg
     prior = history[:-1]
     if not prior or not last_user.strip():
         return last_user
+    recent = prior[-2:]
     convo_lines = [
         f"{m.get('role','?')}: {(m.get('content') or '').strip()}"
-        for m in prior
+        for m in recent
         if m.get("content")
     ]
     if not convo_lines:
         return last_user
     prompt = (
-        "Prior conversation:\n"
+        "Prior conversation (most recent turns only):\n"
         + "\n".join(convo_lines)
-        + f"\n\nLatest user message: {last_user}\n\nRewritten self-contained question:"
+        + f"\n\nLatest user message: {last_user}\n\nRewritten (or unchanged) question:"
     )
     try:
         resp = await llm.chat(
