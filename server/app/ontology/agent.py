@@ -42,6 +42,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "DIRECTLY from your own knowledge. Do not call any tool.\n"
     "- If rag_search returns no relevant passages, say so honestly. Do not "
     "propose external actions.\n\n"
+    "NEVER FABRICATE NUMBERS OR FACTS:\n"
+    "- Do NOT state counts (customers, contracts, tickets, licenses) unless a "
+    "tool response provided that exact number in this turn. If no tool covers "
+    "the question, say '해당 정보는 현재 도구로 조회할 수 없습니다.' honestly.\n"
+    "- Do NOT emit tool invocations as plain text or code "
+    "(e.g. `renewal_risk(vendor_name=\"X\")` or `rag_search {\"query\": \"X\"}`). "
+    "If you need a tool, use the tool_calls channel. Prose must be natural "
+    "language for the user, never a code fragment.\n\n"
     "CONVERSATION CONTEXT (IMPORTANT):\n"
     "The user message you receive has ALREADY been rewritten to be "
     "self-contained using prior conversation context. Treat it as a "
@@ -65,6 +73,12 @@ def _has_hangul(text: str) -> bool:
     return any("\uac00" <= ch <= "\ud7a3" for ch in text)
 
 
+def _has_chinese(text: str) -> bool:
+    # CJK Unified Ideographs. Korean answers must not contain Han characters;
+    # 7B model sometimes falls back to Chinese for unknown-vocabulary phrases.
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 _REWRITE_SYSTEM = (
     "You rewrite the user's latest message ONLY IF it cannot stand alone. "
     "Most messages are already self-contained and MUST be returned verbatim.\n\n"
@@ -81,11 +95,18 @@ _REWRITE_SYSTEM = (
     "   - '깃허브는?' after a JetBrains question -> '깃허브 갱신 위험 고객은?'\n"
     "   - '그럼 LG는?' -> resolve LG in the same context\n"
     "   - '이유는?' -> 'why is that?' in the same context\n"
-    "4) NEVER inject a subject (vendor/name/entity) that is not present in "
-    "the latest message. If the latest message says 'all customers', do not "
-    "narrow it to one vendor from earlier turns.\n"
-    "5) Preserve the user's original language.\n"
-    "6) When in doubt, return unchanged."
+    "4) When the new message names a DIFFERENT subject (a different vendor, "
+    "customer, or entity), REPLACE the prior subject entirely. NEVER "
+    "concatenate the old and new subjects. Examples:\n"
+    "   - prev: 'JetBrains 갱신 리스크', new: '단군소프트 말이야' -> "
+    "'단군소프트 갱신 리스크는?' (NOT 'JetBrains 단군소프트 갱신...')\n"
+    "   - prev: 'Adobe 위험 고객은?', new: 'MongoDB는?' -> "
+    "'MongoDB 위험 고객은?' (NOT 'Adobe MongoDB 위험...')\n"
+    "5) NEVER inject a subject (vendor/name/entity) that is not present in "
+    "the latest message OR the immediately prior turn. If the latest message "
+    "says 'all customers', do not narrow it to one vendor from earlier turns.\n"
+    "6) Preserve the user's original language.\n"
+    "7) When in doubt, return unchanged."
 )
 
 
@@ -203,6 +224,7 @@ async def run(
     ]
     tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
+    language_retries = 0
     final_text = ""
     used_model = model
 
@@ -222,7 +244,72 @@ async def run(
         tc_list = choice.get("tool_calls") or []
 
         if not tc_list:
-            final_text = choice.get("content") or ""
+            candidate = choice.get("content") or ""
+            # Recovery: qwen2.5-7B occasionally emits a would-be tool call as
+            # plain text ('rag_search {"query": "..."}') instead of via the
+            # tool_calls channel. Detect that, execute the tool for real, and
+            # let the loop continue so the model can synthesize a proper answer.
+            recovered = _recover_leaked_tool_call(candidate)
+            if recovered is not None:
+                name, args_json = recovered
+                log.warning("recovered leaked tool_call in content: %s(%s)", name, args_json)
+                if on_event:
+                    await on_event({
+                        "type": "tool_call",
+                        "name": name,
+                        "arguments": args_json,
+                        "narration": _narrate_call(name, args_json),
+                    })
+                result_json = tools.dispatch(name, args_json)
+                if on_event:
+                    await on_event({
+                        "type": "tool_result",
+                        "name": name,
+                        "narration": _narrate_result(name, result_json),
+                        "preview": result_json[:600],
+                    })
+                tool_calls_log.append({
+                    "id": None,
+                    "name": name,
+                    "arguments": args_json,
+                    "result": result_json,
+                    "recovered": True,
+                })
+                messages.append({"role": "assistant", "content": candidate})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[system note] The previous message was a mis-formatted "
+                        f"tool call. I executed `{name}` for you. Result:\n"
+                        f"{result_json}\n\nNow write the final answer for the user."
+                    ),
+                })
+                continue
+            if (
+                _has_hangul(last_user)
+                and _has_chinese(candidate)
+                and language_retries < 2
+            ):
+                language_retries += 1
+                log.warning("chinese chars in korean answer; forcing rewrite (attempt %d)", language_retries)
+                messages.append({"role": "assistant", "content": candidate})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[system note] Your previous reply contained Chinese "
+                        "characters. Rewrite in KOREAN ONLY. Do not use any "
+                        "Han/Chinese characters. If you cannot answer due to "
+                        "missing context, reply exactly: "
+                        "'죄송합니다. 질문의 맥락이 충분하지 않아 답변드리기 어렵습니다. "
+                        "구체적으로 어떤 내용을 확인하고 싶으신지 알려주세요.'"
+                    ),
+                })
+                continue
+            if _has_hangul(last_user) and _has_chinese(candidate):
+                candidate = "".join(
+                    ch for ch in candidate if not ("\u4e00" <= ch <= "\u9fff")
+                ).strip()
+            final_text = candidate
             break
 
         messages.append({
@@ -274,6 +361,152 @@ async def run(
         "iterations": iterations,
         "tool_calls": tool_calls_log,
     })
+
+
+_KNOWN_TOOLS = {t["function"]["name"] for t in tools.TOOLS}
+
+
+def _recover_leaked_tool_call(text: str) -> tuple[str, str] | None:
+    """Detect a would-be tool invocation the model wrote as plain text
+    instead of via the tool_calls channel. Returns (name, args_json).
+
+    Handles four observed 7B leak shapes anywhere in the string:
+      1. name {"k": v}                              (json object literal)
+      2. name(k=v, k=v)                             (python-style kwargs)
+      3. samsung_id = name(k=v, ...)                (python assignment prefix)
+      4. {"name": "tool", "arguments": {"k": v}}    (openai tool-call wrapper)
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    wrapper = _extract_openai_wrapper(s)
+    if wrapper is not None:
+        return wrapper
+    for name in _KNOWN_TOOLS:
+        idx = 0
+        while True:
+            hit = s.find(name, idx)
+            if hit < 0:
+                break
+            before_ok = hit == 0 or not (s[hit - 1].isalnum() or s[hit - 1] == "_")
+            after = s[hit + len(name):hit + len(name) + 1]
+            if before_ok and after in ("(", " ", "\n"):
+                tail = s[hit + len(name):].lstrip()
+                if tail.startswith("{"):
+                    parsed = _extract_json_object(tail)
+                    if parsed is not None:
+                        return name, parsed
+                if tail.startswith("("):
+                    parsed = _extract_kwargs_as_json(tail)
+                    if parsed is not None:
+                        return name, parsed
+            idx = hit + len(name)
+    return None
+
+
+def _extract_json_object(s: str) -> str | None:
+    depth = 0
+    end = -1
+    for i, ch in enumerate(s):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return None
+    candidate = s[:end]
+    try:
+        json.loads(candidate)
+    except (ValueError, TypeError):
+        return None
+    return candidate
+
+
+def _extract_openai_wrapper(s: str) -> tuple[str, str] | None:
+    idx = 0
+    while True:
+        brace = s.find("{", idx)
+        if brace < 0:
+            return None
+        obj = _extract_json_object(s[brace:])
+        if obj is not None:
+            try:
+                data = json.loads(obj)
+            except (ValueError, TypeError):
+                data = None
+            if isinstance(data, dict):
+                name = data.get("name")
+                args = data.get("arguments")
+                if name in _KNOWN_TOOLS and isinstance(args, dict):
+                    return name, json.dumps(args, ensure_ascii=False)
+            idx = brace + len(obj)
+        else:
+            idx = brace + 1
+
+
+def _extract_kwargs_as_json(s: str) -> str | None:
+    depth = 0
+    end = -1
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return None
+    inner = s[1:end - 1].strip()
+    if not inner:
+        return "{}"
+    args: dict[str, Any] = {}
+    for pair in _split_top_level_commas(inner):
+        if "=" not in pair:
+            return None
+        key, _, val = pair.partition("=")
+        key = key.strip()
+        val = val.strip().rstrip(",").strip()
+        if not key.isidentifier():
+            return None
+        try:
+            args[key] = json.loads(val)
+        except (ValueError, TypeError):
+            val_stripped = val.strip('"').strip("'")
+            args[key] = val_stripped
+    return json.dumps(args, ensure_ascii=False)
+
+
+def _split_top_level_commas(s: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    in_str: str | None = None
+    for ch in s:
+        if in_str:
+            buf.append(ch)
+            if ch == in_str and (not buf or len(buf) < 2 or buf[-2] != "\\"):
+                in_str = None
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            buf.append(ch)
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip())
+    return [p for p in parts if p]
 
 
 def _narrate_call(name: str, args_json: str) -> str:

@@ -47,6 +47,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("rag")
 
+# Silence known-benign Chroma noise:
+# - local_persistent_hnsw "Add of existing embedding ID" fires on every query
+#   that touches IDs which were double-persisted at ingest time. It's a data
+#   artefact from a past double-add of pool-jira-MAN-0198/0199, not a bug in
+#   the query path, and does not affect retrieval.
+# - product.posthog "capture() takes 1 positional argument but 3 were given"
+#   is a Chroma <-> posthog SDK mismatch; telemetry we don't want anyway.
+logging.getLogger("chromadb.segment.impl.vector.local_persistent_hnsw").setLevel(logging.ERROR)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
