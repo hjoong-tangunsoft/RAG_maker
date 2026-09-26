@@ -168,10 +168,13 @@ async def openai_chat_completions(body: OAIChatRequest) -> dict:
 
     system_msg = next((m.content for m in body.messages if m.role == "system"), None)
 
+    # "ontology-agent" is our virtual external name; agent uses its default
+    # (real LiteLLM model) unless caller explicitly names a real model.
+    real_model = None if (body.model or "").strip() in ("", "ontology-agent") else body.model
     trace = await agent.run(
         user_message=last_user,
         system_prompt=system_msg,
-        model=body.model,
+        model=real_model,
         temperature=body.temperature if body.temperature is not None else 0.2,
         max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
     )
