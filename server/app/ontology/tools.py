@@ -80,6 +80,55 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_customers",
+            "description": (
+                "List all customers registered in the business ontology, "
+                "optionally filtered by a vendor they hold a contract with. "
+                "Use this when the user asks how many customers exist, for a "
+                "customer roster, or 'which customers use [vendor]'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vendor_name": {
+                        "type": "string",
+                        "description": "Filter to customers with at least one contract for this vendor (e.g. 'JetBrains'). Omit for all customers.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_customer_contracts",
+            "description": (
+                "List all contracts for one customer (product, vendor, seats, "
+                "amount, renewal date, days until renewal). Use this when the "
+                "user asks for a customer's contract list, active licenses, or "
+                "'what does [customer] have with us'. Provide EITHER customer_id "
+                "('c_samsung') OR customer_name ('삼성전자') - if you only know "
+                "the display name, pass it as customer_name and the tool will "
+                "resolve it. Do NOT invent id literals like 'samsung_id'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_id": {
+                        "type": "string",
+                        "description": "Internal customer id (e.g. 'c_samsung'). Prefer this if known.",
+                    },
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Display name (e.g. '삼성전자'). Use this if you don't know the id.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rag_search",
             "description": (
                 "Search the internal RAG knowledge base (ingested documents, "
@@ -137,6 +186,19 @@ def dispatch(name: str, arguments_json: str) -> str:
             if not cid:
                 return json.dumps({"error": "customer_id is required"})
             result = actions.draft_response_plan(customer_id=str(cid))
+            return result.model_dump_json()
+        if name == "list_customers":
+            result = actions.list_customers(vendor_name=args.get("vendor_name") or None)
+            return result.model_dump_json()
+        if name == "list_customer_contracts":
+            cid = args.get("customer_id")
+            cname = args.get("customer_name")
+            if not cid and not cname:
+                return json.dumps({"error": "customer_id or customer_name is required"})
+            result = actions.list_customer_contracts(
+                customer_id=str(cid) if cid else None,
+                customer_name=str(cname) if cname else None,
+            )
             return result.model_dump_json()
         if name == "rag_search":
             q = str(args.get("query") or "").strip()

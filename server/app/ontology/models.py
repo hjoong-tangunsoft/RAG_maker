@@ -99,3 +99,28 @@ class ResponsePlan(BaseModel):
     generated_at: datetime
     summary: str
     actions: list[str]
+
+
+class CustomerListItem(BaseModel):
+    customer: Customer
+    contract_count: int
+    active_vendors: list[str]
+
+
+class CustomerListReport(BaseModel):
+    generated_at: datetime
+    filter: dict[str, str]
+    items: list[CustomerListItem]
+
+
+class ContractDetail(BaseModel):
+    contract: Contract
+    product: Product
+    vendor: Vendor
+    days_until_renewal: int
+
+
+class CustomerContractsReport(BaseModel):
+    customer: Customer
+    generated_at: datetime
+    items: list[ContractDetail]
