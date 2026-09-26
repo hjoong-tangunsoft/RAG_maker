@@ -33,10 +33,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "or any tool not in the list.\n\n"
     "TOOL POLICY:\n"
     "- Ontology questions (customers, contracts, renewals, tickets, vendors) "
-    "MUST use the provided tools. Do not guess.\n"
+    "MUST use the ontology tools (renewal_risk, draft_response_plan).\n"
+    "- Questions about JIRA issues, documents, notes, wiki pages, exported "
+    "tickets, PDFs, or ANY factual content outside the customer/contract "
+    "ontology MUST use `rag_search` FIRST. The RAG knowledge base already "
+    "contains our JIRA export - never claim you need JIRA API/web access.\n"
     "- General questions (greetings, definitions, unrelated topics) answer "
     "DIRECTLY from your own knowledge. Do not call any tool.\n"
-    "- If you lack the info and no tool can help, say so briefly. Do not "
+    "- If rag_search returns no relevant passages, say so honestly. Do not "
     "propose external actions.\n\n"
     "CONVERSATION CONTEXT (IMPORTANT):\n"
     "The user message you receive has ALREADY been rewritten to be "
@@ -264,6 +268,9 @@ def _narrate_call(name: str, args_json: str) -> str:
     if name == "draft_response_plan":
         cid = args.get("customer_id", "?")
         return f"`draft_response_plan` 도구로 고객 **{cid}** 의 대응안 초안을 작성합니다."
+    if name == "rag_search":
+        q = args.get("query", "")
+        return f"`rag_search` 도구로 RAG 지식베이스에서 **{q}** 를 검색합니다."
     return f"`{name}` 도구를 호출합니다."
 
 
@@ -287,6 +294,12 @@ def _narrate_result(name: str, result_json: str) -> str:
         cnt_c = len(contracts) if isinstance(contracts, list) else 0
         cnt_t = len(tickets) if isinstance(tickets, list) else 0
         return f"대응안 작성 완료 (활성 계약 {cnt_c}건, 최근 지원티켓 {cnt_t}건 분석)."
+    if name == "rag_search" and isinstance(data, dict) and isinstance(data.get("items"), list):
+        items = data["items"]
+        if not items:
+            return "RAG 지식베이스에서 관련 문서를 찾지 못했습니다."
+        srcs = list({(it.get("source") or "?") for it in items[:5]})
+        return f"RAG에서 {len(items)}건의 관련 passage를 찾았습니다 (출처: {', '.join(srcs[:3])})."
     if isinstance(data, dict) and isinstance(data.get("items"), list):
         return f"{len(data['items'])}건 조회 완료."
     if isinstance(data, list):

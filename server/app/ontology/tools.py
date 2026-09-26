@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .. import rag
 from . import actions
 
 # ---------- schemas exposed to the LLM ----------
@@ -76,6 +77,37 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": (
+                "Search the internal RAG knowledge base (ingested documents, "
+                "JIRA issue exports, wiki pages, PDFs, notes, etc.) by semantic "
+                "similarity. Use this WHENEVER the user asks about JIRA issues, "
+                "documents, notes, tickets exported to the knowledge base, or "
+                "any factual content that is NOT customer/contract/renewal data "
+                "in the business ontology. NEVER answer 'I need to check the "
+                "JIRA API / web' - always call this tool first. Returns the "
+                "top matching passages with source labels."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query in the user's language. Rewrite it to be specific.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "How many passages to retrieve (default 5, max 20).",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -106,6 +138,21 @@ def dispatch(name: str, arguments_json: str) -> str:
                 return json.dumps({"error": "customer_id is required"})
             result = actions.draft_response_plan(customer_id=str(cid))
             return result.model_dump_json()
+        if name == "rag_search":
+            q = str(args.get("query") or "").strip()
+            if not q:
+                return json.dumps({"error": "query is required"})
+            k = max(1, min(int(args.get("k", 5) or 5), 20))
+            hits = rag.retrieve(q, k=k)
+            items = [
+                {
+                    "source": (h.get("metadata") or {}).get("source", "unknown"),
+                    "score": round(float(h.get("score", 0.0)), 4),
+                    "text": (h.get("text") or "").strip()[:800],
+                }
+                for h in hits
+            ]
+            return json.dumps({"query": q, "items": items}, ensure_ascii=False)
         return json.dumps({"error": f"unknown tool: {name}"})
     except ValueError as e:
         return json.dumps({"error": str(e)})
