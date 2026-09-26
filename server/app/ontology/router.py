@@ -130,7 +130,7 @@ class AgentChatRequest(BaseModel):
 @router.post("/agent/chat")
 async def agent_chat(body: AgentChatRequest) -> dict:
     return await agent.run(
-        user_message=body.message,
+        [{"role": "user", "content": body.message}],
         system_prompt=body.system_prompt,
         model=body.model,
         max_iterations=body.max_iterations,
@@ -164,17 +164,25 @@ async def openai_chat_completions(body: OAIChatRequest):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "empty user message")
 
     system_msg = next((m.content for m in body.messages if m.role == "system"), None)
+    history = [
+        {
+            "role": m.role,
+            "content": _strip_trace(m.content or "") if m.role == "assistant" else (m.content or ""),
+        }
+        for m in body.messages
+        if m.role in ("user", "assistant") and (m.content or "").strip()
+    ]
 
     real_model = None if (body.model or "").strip() in ("", "ontology-agent") else body.model
 
     if body.stream:
         return StreamingResponse(
-            _stream_agent(body, last_user, system_msg, real_model),
+            _stream_agent(body, history, system_msg, real_model),
             media_type="text/event-stream",
         )
 
     trace = await agent.run(
-        user_message=last_user,
+        history,
         system_prompt=system_msg,
         model=real_model,
         temperature=body.temperature if body.temperature is not None else 0.2,
@@ -219,7 +227,21 @@ async def openai_list_models() -> dict:
 _DONE = object()
 
 
-async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | None, real_model: str | None):
+def _strip_trace(content: str) -> str:
+    """Remove our streamed trace wrapper from a prior assistant message.
+
+    The SSE stream emits '**실행 과정** ... ---\\n\\n<final answer>'. When the
+    client sends that back as assistant history, the model imitates the trace
+    prose ('renewal_risk 도구로 다시 조회했습니다') instead of emitting a real
+    tool call. Keeping only the tail after the last '---' separator removes
+    that bait.
+    """
+    if "---" in content:
+        return content.rsplit("---", 1)[-1].strip()
+    return content.strip()
+
+
+async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: str | None, real_model: str | None):
     """SSE generator that shows tool calls in real time as they happen.
 
     Uses an asyncio.Queue as a bridge: agent.run() executes in a background task
@@ -248,28 +270,20 @@ async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | N
         if t == "thinking":
             it = evt["iteration"]
             msg = (
-                "사용자 질문을 분석하고 있습니다..."
+                "> _사용자 질문을 분석하고 있습니다..._"
                 if it == 1
-                else f"이전 결과를 바탕으로 다음 단계를 판단하고 있습니다... (반복 {it})"
+                else f"> _이전 결과를 바탕으로 다음 단계를 판단하고 있습니다... (반복 {it})_"
             )
-            await queue.put(f"\n{msg}\n")
+            await queue.put(f"\n{msg}\n\n")
         elif t == "tool_call":
-            await queue.put(
-                f"\n{evt['narration']}\n\n"
-                f"<details><summary>호출 인자 원본</summary>\n\n"
-                f"```json\n{evt['arguments']}\n```\n\n</details>\n"
-            )
+            await queue.put(f"\n> {evt['narration']}\n\n")
         elif t == "tool_result":
-            await queue.put(
-                f"\n{evt['narration']}\n\n"
-                f"<details><summary>결과 원본</summary>\n\n"
-                f"```json\n{evt.get('preview', '')}\n```\n\n</details>\n"
-            )
+            await queue.put(f"\n> {evt['narration']}\n\n")
 
     async def run_agent():
         try:
             trace = await agent.run(
-                user_message=user_msg,
+                history,
                 system_prompt=system_msg,
                 model=real_model,
                 temperature=body.temperature if body.temperature is not None else 0.2,
@@ -284,7 +298,7 @@ async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | N
 
     asyncio.create_task(run_agent())
 
-    yield chunk("<details open>\n<summary>실행 과정 (클릭해서 접기/펼치기)</summary>\n\n")
+    yield chunk("**실행 과정**\n\n")
 
     final_answer = ""
     while True:
@@ -300,7 +314,7 @@ async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | N
             continue
         yield chunk(item)
 
-    yield chunk("\n</details>\n\n")
+    yield chunk("\n\n---\n\n")
     if final_answer:
         yield chunk(final_answer)
     yield chunk("", finish="stop")

@@ -26,20 +26,35 @@ DEFAULT_SYSTEM_PROMPT = (
     "developer tools (JetBrains, GitHub Enterprise). You have tools to query "
     "the business ontology: customers, contracts, licenses, support tickets, "
     "vendors.\n\n"
+    "ENVIRONMENT: This is an internal air-gapped deployment. You have NO web "
+    "access, NO file system access, NO shell. The ONLY tools you can call are "
+    "the ones provided in the tools list. Do not invent tools. Do not suggest "
+    "'searching the web', '웹 검색', 'search_web', 'read_file', 'run_command' "
+    "or any tool not in the list.\n\n"
     "TOOL POLICY:\n"
-    "- For questions about customers, contracts, renewals, licenses, tickets, "
-    "or vendors, USE THE PROVIDED TOOLS. Do not guess.\n"
-    "- For general questions (greetings, company definitions, unrelated topics, "
-    "questions the tools cannot answer), answer DIRECTLY from your knowledge "
-    "WITHOUT calling any tool. Do not fabricate tool names.\n"
-    "- NEVER call a tool that is not in the provided tools list. NEVER mention "
-    "tool names like 'search_web', 'read_file' that you do not actually have.\n\n"
+    "- Ontology questions (customers, contracts, renewals, tickets, vendors) "
+    "MUST use the provided tools. Do not guess.\n"
+    "- General questions (greetings, definitions, unrelated topics) answer "
+    "DIRECTLY from your own knowledge. Do not call any tool.\n"
+    "- If you lack the info and no tool can help, say so briefly. Do not "
+    "propose external actions.\n\n"
+    "CONVERSATION CONTEXT (IMPORTANT):\n"
+    "Short follow-ups from the user MUST be interpreted as continuing the "
+    "topic of the previous turn. Examples:\n"
+    "- Previous turn was about 'JetBrains 갱신 위험 고객'. User then says "
+    "'깃허브는?' -> interpret as 'GitHub 갱신 위험 고객은?' and you MUST call "
+    "the same tool again with vendor_name='GitHub'. Never answer from prior "
+    "turn's memory - always re-query the tool for the new vendor/subject.\n"
+    "- User says '그럼 LG는?' -> interpret as continuation about LG in the "
+    "same context and re-run the appropriate tool.\n"
+    "Never treat a short follow-up as a brand-new definition request. "
+    "Never skip the tool call just because the topic feels familiar.\n\n"
     "LANGUAGE POLICY (STRICT, NON-NEGOTIABLE):\n"
     "1) Detect the user's language from their message.\n"
     "2) Your ENTIRE final answer MUST be in that single language.\n"
     "3) If the user writes in Korean, answer ONLY in Korean - no English "
     "sentences, no Chinese characters, no mixed language, no romanized "
-    "Chinese pinyin.\n"
+    "Chinese pinyin, no Chinese instructions to yourself.\n"
     "4) NEVER repeat the answer in another language.\n"
     "5) This rule overrides any default tendency to use English or Chinese.\n\n"
     "Be concise and factual."
@@ -55,7 +70,7 @@ class AgentTrace(dict[str, Any]):
 
 
 async def run(
-    user_message: str,
+    conversation: list[dict[str, Any]] | str,
     *,
     system_prompt: str | None = None,
     model: str | None = None,
@@ -66,18 +81,33 @@ async def run(
 ) -> AgentTrace:
     """Run the agent loop until a final text answer or iteration limit.
 
+    conversation: full message list ([{role, content}, ...]) OR a single user
+    string (legacy). Multi-turn history is required for follow-ups like
+    '깃허브는?' to resolve against the prior turn.
+
     on_event: optional async callback invoked at each tool_call and tool_result
     so a streaming client (SSE wrapper) can show progress in real time.
     """
+    # normalize: legacy str -> single-user list
+    if isinstance(conversation, str):
+        history: list[dict[str, Any]] = [{"role": "user", "content": conversation}]
+    else:
+        # strip any pre-existing system messages; we own the system prompt
+        history = [m for m in conversation if m.get("role") != "system"]
+    last_user = next(
+        (m.get("content", "") for m in reversed(history) if m.get("role") == "user"),
+        "",
+    )
+
     base_system = system_prompt or DEFAULT_SYSTEM_PROMPT
-    if _has_hangul(user_message):
+    if _has_hangul(last_user or ""):
         base_system += (
             "\n\nCONFIRMED USER LANGUAGE: Korean. "
             "Your final answer MUST be entirely in Korean. No English sentences."
         )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": base_system},
-        {"role": "user", "content": user_message},
+        *history,
     ]
     tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
