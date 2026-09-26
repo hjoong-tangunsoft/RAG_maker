@@ -262,11 +262,11 @@ def _narrate_call(name: str, args_json: str) -> str:
     try:
         args = json.loads(args_json or "{}")
     except (ValueError, TypeError):
-        return f"{name} 도구를 호출합니다."
+        return f"`{name}` 도구를 호출합니다."
     if name == "renewal_risk":
         parts: list[str] = []
         if v := args.get("vendor_name"):
-            parts.append(f"벤더 {v}")
+            parts.append(f"벤더 **{v}**")
         if d := args.get("days_until_renewal"):
             parts.append(f"갱신일 {d}일 이내")
         if w := args.get("recent_window_days"):
@@ -274,14 +274,14 @@ def _narrate_call(name: str, args_json: str) -> str:
         if t := args.get("min_recent_tickets"):
             parts.append(f"지원티켓 {t}건 이상")
         crit = ", ".join(parts) if parts else "기본 조건"
-        return f"renewal_risk 도구로 갱신 위험 고객을 조회합니다. 조건은 {crit} 입니다."
+        return f"`renewal_risk` 도구로 갱신 위험 고객을 조회합니다. 조건: {crit}."
     if name == "draft_response_plan":
         cid = args.get("customer_id", "?")
-        return f"draft_response_plan 도구로 고객 {cid} 의 대응안 초안을 작성합니다."
+        return f"`draft_response_plan` 도구로 고객 **{cid}** 의 대응안 초안을 작성합니다."
     if name == "rag_search":
         q = args.get("query", "")
-        return f"rag_search 도구로 RAG 지식베이스에서 '{q}' 를 검색합니다."
-    return f"{name} 도구를 호출합니다."
+        return f"`rag_search` 도구로 RAG 지식베이스에서 **{q}** 를 검색합니다."
+    return f"`{name}` 도구를 호출합니다."
 
 
 def _narrate_result(name: str, result_json: str) -> str:
