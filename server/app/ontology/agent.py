@@ -127,7 +127,25 @@ async def _rewrite_query(history: list[dict[str, Any]], last_user: str) -> str:
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
         text = text.strip('"').strip("'").strip()
-        return text or last_user
+        if not text:
+            return last_user
+        # Defense: small models sometimes echo a prior assistant refusal instead
+        # of rewriting. Reject rewrites that (a) balloon in length AND (b) look
+        # like refusal / meta commentary rather than a question.
+        refusal_markers = (
+            "도구가 없", "찾을 수 없", "다른 방법", "제공되지 않", "추가 지침",
+            "sorry", "cannot", "unable to", "i don't have",
+        )
+        low = text.lower()
+        looks_like_refusal = any(m in low for m in refusal_markers)
+        much_longer = len(text) > max(80, len(last_user) * 3)
+        if looks_like_refusal or much_longer:
+            log.warning(
+                "query rewrite rejected (refusal=%s longer=%s): %r",
+                looks_like_refusal, much_longer, text[:120],
+            )
+            return last_user
+        return text
     except Exception as e:  # noqa: BLE001
         log.warning("query rewrite failed, falling back to raw: %s", e)
         return last_user
