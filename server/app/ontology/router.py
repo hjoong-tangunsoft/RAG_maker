@@ -1,6 +1,9 @@
 """FastAPI router exposing ontology objects + actions."""
 from __future__ import annotations
 
+import time
+import uuid
+
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -131,3 +134,73 @@ async def agent_chat(body: AgentChatRequest) -> dict:
         temperature=body.temperature,
         max_tokens=body.max_tokens,
     )
+
+
+# ---------- OpenAI-compatible wrapper (for Continue.dev, OpenAI SDKs, etc.) ----------
+
+class OAIMessage(BaseModel):
+    role: str
+    content: str | None = None
+
+
+class OAIChatRequest(BaseModel):
+    model: str | None = None
+    messages: list[OAIMessage]
+    temperature: float | None = 0.2
+    max_tokens: int | None = 1024
+    stream: bool | None = False
+
+
+@router.post("/v1/chat/completions")
+async def openai_chat_completions(body: OAIChatRequest) -> dict:
+    """Adapt the ontology agent to OpenAI Chat Completions shape.
+
+    Streaming is not implemented - returns the full response at once. Tool call
+    traces are embedded under a non-standard `ontology_trace` field so clients
+    that care can inspect them; Continue.dev ignores unknown fields.
+    """
+    user_msgs = [m for m in body.messages if m.role == "user"]
+    if not user_msgs:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "no user message")
+    last_user = user_msgs[-1].content or ""
+    if not last_user.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "empty user message")
+
+    system_msg = next((m.content for m in body.messages if m.role == "system"), None)
+
+    trace = await agent.run(
+        user_message=last_user,
+        system_prompt=system_msg,
+        model=body.model,
+        temperature=body.temperature if body.temperature is not None else 0.2,
+        max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
+    )
+    return {
+        "id": f"chatcmpl-ont-{uuid.uuid4().hex[:16]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": trace.get("model") or body.model or "qwen2.5-7b",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": trace.get("answer", "")},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "ontology_trace": {
+            "iterations": trace.get("iterations"),
+            "tool_calls": trace.get("tool_calls", []),
+        },
+    }
+
+
+@router.get("/v1/models")
+async def openai_list_models() -> dict:
+    return {
+        "object": "list",
+        "data": [{
+            "id": "ontology-agent",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "tangunsoft",
+        }],
+    }
