@@ -228,16 +228,18 @@ _DONE = object()
 
 
 def _strip_trace(content: str) -> str:
-    """Remove our streamed trace wrapper from a prior assistant message.
+    """Remove our streamed trace prose from a prior assistant message.
 
-    The SSE stream emits '**실행 과정** ... ---\\n\\n<final answer>'. When the
-    client sends that back as assistant history, the model imitates the trace
-    prose ('renewal_risk 도구로 다시 조회했습니다') instead of emitting a real
-    tool call. Keeping only the tail after the last '---' separator removes
-    that bait.
+    The SSE stream emits '실행 과정\\n\\n...prose...\\n답변\\n\\n<final answer>'.
+    When the client sends that back as assistant history, the model imitates
+    the trace prose ('renewal_risk 도구로 다시 조회했습니다') instead of
+    emitting a real tool call. Keeping only the tail after the last '답변'
+    label removes that bait. We also handle the older '---' separator for
+    backward compatibility with sessions started before the format change.
     """
-    if "---" in content:
-        return content.rsplit("---", 1)[-1].strip()
+    for sep in ("\n답변\n", "\n---\n"):
+        if sep in content:
+            return content.rsplit(sep, 1)[-1].strip()
     return content.strip()
 
 
@@ -269,21 +271,21 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
         t = evt.get("type")
         if t == "rewrite":
             await queue.put(
-                f"\n> _이전 대화 맥락을 반영해 질문을 재구성했습니다: "
-                f"**{evt['rewritten']}**_\n\n"
+                f"이전 대화 맥락을 반영해 질문을 다음과 같이 재구성했습니다: "
+                f"{evt['rewritten']}\n\n"
             )
         elif t == "thinking":
             it = evt["iteration"]
             msg = (
-                "> _사용자 질문을 분석하고 있습니다..._"
+                "사용자 질문을 분석하고 있습니다."
                 if it == 1
-                else f"> _이전 결과를 바탕으로 다음 단계를 판단하고 있습니다... (반복 {it})_"
+                else f"이전 결과를 바탕으로 다음 단계를 판단하고 있습니다. (반복 {it})"
             )
-            await queue.put(f"\n{msg}\n\n")
+            await queue.put(f"{msg}\n\n")
         elif t == "tool_call":
-            await queue.put(f"\n> {evt['narration']}\n\n")
+            await queue.put(f"{evt['narration']}\n\n")
         elif t == "tool_result":
-            await queue.put(f"\n> {evt['narration']}\n\n")
+            await queue.put(f"{evt['narration']}\n\n")
 
     async def run_agent():
         try:
@@ -303,7 +305,7 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
 
     asyncio.create_task(run_agent())
 
-    yield chunk("**실행 과정**\n\n")
+    yield chunk("실행 과정\n\n")
 
     final_answer = ""
     while True:
@@ -319,7 +321,7 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
             continue
         yield chunk(item)
 
-    yield chunk("\n\n---\n\n")
+    yield chunk("\n답변\n\n")
     if final_answer:
         yield chunk(final_answer)
     yield chunk("", finish="stop")
