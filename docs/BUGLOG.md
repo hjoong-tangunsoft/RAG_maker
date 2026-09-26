@@ -27,7 +27,7 @@ Ontology Agent / RAG 파이프라인에서 발견된 버그를 시간순으로 �
 | 3 | Rewriter refusal 형태 출력을 그대로 반환 | resolved | P1 | 2026-09-26 | `a4c471b` |
 | 4 | Trace wrapper가 assistant history에 재유입 | resolved | P1 | 2026-09-26 | (이전 세션) |
 | 5 | 5턴 이상 대화에서 stale context leakage | resolved | P1 | 2026-09-26 | (이전 세션) |
-| 6 | Chroma HNSW 중복 persist ERROR + posthog CRITICAL 소음 | mitigated | P2 | 2026-09-26 | `51f138f` |
+| 6 | Chroma HNSW 중복 persist WARNING + posthog CRITICAL 소음 | resolved | P2 | 2026-09-26 | `51f138f` |
 | 7 | Rewriter 출력 3배 이상 팽창 시 원문 무시 | resolved | P1 | 2026-09-26 | `a4c471b` |
 | 8 | 짧은 인사("안녕") 입력 시 무리한 tool 호출 시도 | resolved | P1 | 2026-09-26 | (이전 세션) |
 | 9 | 툴 결과 없는 숫자/사실 환각 | resolved | P0 | 2026-09-26 | `51f138f` |
@@ -88,16 +88,21 @@ Ontology Agent / RAG 파이프라인에서 발견된 버그를 시간순으로 �
 - **검증**: E3 프로브 통과.
 - **커밋**: (이전 세션)
 
-## #6 Chroma HNSW 중복 persist ERROR + posthog CRITICAL 소음
+## #6 Chroma HNSW 중복 persist WARNING + posthog CRITICAL 소음
 
-- **상태**: mitigated · **우선순위**: P2 · **발견**: 2026-09-26
-- **증상**: 매 요청마다 `Add of existing embedding ID: pool-jira-MAN-0198::00000` ERROR + posthog 관련 CRITICAL 로그로 log가 도배.
-- **재현**: `journalctl -u rag.service -f`.
-- **근본원인**: (a) 손상된 Chroma 문서 2건(`MAN-0198`, `MAN-0199`)이 HNSW에 중복 persist 시도. (b) posthog 텔레메트리 실패.
-- **해결 (완화)**: `main.py`에서 `chromadb.segment.impl.vector.local_persistent_hnsw` → ERROR, `chromadb.telemetry.product.posthog` → CRITICAL로 로거 억제. **근본해결 (해당 문서 재삽입)은 별도 유지보수 티켓**.
-- **검증**: `journalctl` 재관측 시 해당 라인 사라짐 확인.
+- **상태**: resolved · **우선순위**: P2 · **발견**: 2026-09-26
+- **증상**: 매 쿼리마다 `Add of existing embedding ID: pool-jira-MAN-0198::00000` 같은 로그 + posthog CRITICAL로 journal 도배.
+- **재현**: `journalctl -u rag.service -f` 상태에서 `/rag/search` 호출.
+- **근본원인** (2026-09-26 정정):
+  - `Add of existing embedding ID`는 `chromadb/segment/impl/vector/local_persistent_hnsw.py:339`의 `logger.warning()` 호출. **ERROR 아님, 데이터 손상 아님.** Chroma가 HNSW 인덱스에 이미 존재하는 embedding ID를 재추가하려 할 때 발생하는 내부 양성 경고 (특정 쿼리 경로에서 정상 재-persist 사이클에 발생).
+  - 초기 가설("특정 문서가 ingest 시 이중 persist됨")은 **틀림**. 검증: MAN-0198/0199 삭제 후 재삽입해도 `chunk_count=218` 유지 (doc_count=216 + 정상적으로 2 chunk로 split된 다른 문서 2건). 즉 +2 delta는 데이터 손상이 아닌 정상.
+  - posthog는 Chroma↔posthog SDK 버전 mismatch, telemetry 실패.
+- **해결**: `main.py`에서 두 로거의 레벨 상향:
+  - `chromadb.segment.impl.vector.local_persistent_hnsw` → `ERROR` (WARNING 억제)
+  - `chromadb.telemetry.product.posthog` → `CRITICAL`
+- **검증**: 5회 `/rag/search` 트리거 후 `journalctl` 필터링 결과 `Add of existing` 0건, `posthog` 0건.
 - **커밋**: `51f138f`
-- **미결 액션**: 손상된 2문서 Chroma 재삽입
+- **후기**: 초기 가설 검증을 게을리했음. "특정 doc_id가 로그에 등장" ≠ "그 doc이 손상". 다음 유사 버그에서는 먼저 chroma 소스 로그 레벨/맥락부터 확인.
 
 ## #7 Rewriter 출력 3배 이상 팽창 시 원문 무시
 
@@ -169,6 +174,5 @@ Ontology Agent / RAG 파이프라인에서 발견된 버그를 시간순으로 �
 
 ## 미결/추적 중
 
-- **#6 근본해결**: 손상된 Chroma 문서(`pool-jira-MAN-0198::00000`, `pool-jira-MAN-0199::00000`) 재삽입. `/upload/rag/data/docs-pool` 원본 정합성 확인 후 collection 재구성 필요.
 - **툴 커버리지 갭** (버그는 아니지만 회귀 대상): `list_customer_contracts`, `list_customers` 미구현. 현재는 #9 정직한 refusal로 처리 중. 티켓화 예정.
 - **모델 의미 한계** (infra 버그 아님, 추적만): F3 두 번 연속 subject 교체 시 wiki 정의로 폴백, MongoDB 등 미등록 벤더에 대해 "위험 없음" 오답. LiteLLM intent-router (#37) 도입 후 재평가.
