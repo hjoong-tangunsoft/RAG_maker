@@ -281,9 +281,20 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
             )
             await queue.put(f"\n{msg}\n\n")
         elif t == "tool_call":
-            await queue.put(f"\n> {evt['narration']}\n\n")
+            await queue.put(
+                f"\n> {evt['narration']}\n\n"
+                f"<details><summary>호출 인자</summary>\n\n"
+                f"```json\n{evt.get('arguments', '')}\n```\n\n"
+                f"</details>\n\n"
+            )
         elif t == "tool_result":
-            await queue.put(f"\n> {evt['narration']}\n\n")
+            preview = evt.get("preview", "")
+            await queue.put(
+                f"\n> {evt['narration']}\n\n"
+                f"<details><summary>결과 원본 (앞 600자)</summary>\n\n"
+                f"```json\n{preview}\n```\n\n"
+                f"</details>\n\n"
+            )
 
     async def run_agent():
         try:
@@ -303,7 +314,7 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
 
     asyncio.create_task(run_agent())
 
-    yield chunk("**실행 과정**\n\n")
+    yield chunk("<details open>\n<summary><b>실행 과정</b> (클릭해서 접기/펼치기)</summary>\n\n")
 
     final_answer = ""
     while True:
@@ -319,7 +330,7 @@ async def _stream_agent(body: OAIChatRequest, history: list[dict], system_msg: s
             continue
         yield chunk(item)
 
-    yield chunk("\n\n---\n\n")
+    yield chunk("\n\n</details>\n\n---\n\n")
     if final_answer:
         yield chunk(final_answer)
     yield chunk("", finish="stop")
