@@ -1,0 +1,25 @@
+# /etc/systemd/system/jira-export.service
+# Fetches Jira issues from configured project and writes markdown files
+# to the RAG document pool. rag-sync.timer picks them up 2/day for actual
+# ingestion (Smart Client, Dumb Server principle).
+[Unit]
+Description=Jira issues -> RAG document pool exporter
+Documentation=https://github.com/hjoong-tangunsoft/RAG_maker/blob/RAG_maker/docs/DESIGN_PRINCIPLES.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rocky
+Group=rocky
+WorkingDirectory=/upload/rag
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/upload/rag/scripts
+Environment=POOL_DIR=/upload/rag/data/docs-pool
+EnvironmentFile=/upload/rag/jira.env
+ExecStart=/upload/rag/venv/bin/python3 -m exporters.jira_export
+StandardOutput=journal
+StandardError=journal
+CPUQuota=100%
+MemoryMax=512M
+TimeoutStartSec=600

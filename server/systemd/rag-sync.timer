@@ -1,0 +1,19 @@
+# /etc/systemd/system/rag-sync.timer
+# Daily automated RAG document sync at 03:00 KST.
+# Enable: sudo systemctl enable --now rag-sync.timer
+# Status: systemctl list-timers rag-sync.timer
+[Unit]
+Description=Daily RAG document sync timer
+Documentation=https://github.com/hjoong-tangunsoft/RAG_maker/blob/RAG_maker/docs/DESIGN_PRINCIPLES.md
+
+[Timer]
+# Every day at 03:00 (server local timezone).
+# If the machine was off at fire time, run at next boot (Persistent=true).
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+# Small random delay to avoid thundering-herd if many nodes share the schedule
+RandomizedDelaySec=300
+Unit=rag-sync.service
+
+[Install]
+WantedBy=timers.target

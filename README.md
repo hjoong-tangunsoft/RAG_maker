@@ -183,3 +183,11 @@ BASE=https://llm.tangunsoft.com ./scripts/smoke_test.sh
    OOM. 따라서 임베딩은 CPU 고정. 문서 인제스트 처리량은 4 vCPU 기준
    대략 초당 3~5 청크. 대량 배치 필요하면 `EMBED_BATCH_SIZE` 를 키우고
    여유 있는 시간대에 백그라운드로 넣는 것 권장.
+
+## 관련 문서
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 시스템 아키텍처 상세 설명 (개념/구조/흐름/용어)
+- [`docs/DESIGN_PRINCIPLES.md`](docs/DESIGN_PRINCIPLES.md) — 자동 인제스트 파이프라인 설계 원칙 (Dumb Server, Smart Client)
+- 블로그 [사내 RAG 완전 구축기](https://blog.tangunsoft.com/rag-setup-fastapi-chroma-vllm) — 전체 구축 여정 (Post 1)
+- 블로그 [자동 인제스트 파이프라인 - Dumb Server, Smart Client](https://blog.tangunsoft.com/rag-dumb-server-smart-client) — 설계 원칙 상세 (Post 2)
+- 로드맵 [Epic #16](https://github.com/hjoong-tangunsoft/RAG_maker/issues/16) — 자동 인제스트 파이프라인 구축 4단계

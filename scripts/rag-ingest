@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Shell wrapper for `python -m rag_ingest`.
+# Installed to /usr/local/bin/rag-ingest so users can invoke:
+#     rag-ingest sync
+#     rag-ingest status
+#     rag-ingest --help
+#
+# Sets PYTHONPATH so the rag_ingest package (which lives outside site-packages)
+# is importable. Uses the RAG service's own venv Python to guarantee httpx
+# and the same lib versions the server uses.
+set -euo pipefail
+PYTHONPATH="${RAG_SCRIPTS_DIR:-/upload/rag/scripts}" \
+  exec /upload/rag/venv/bin/python3 -m rag_ingest "$@"
