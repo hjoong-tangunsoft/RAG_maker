@@ -1,6 +1,7 @@
 """FastAPI router exposing ontology objects + actions."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -165,6 +166,13 @@ async def openai_chat_completions(body: OAIChatRequest):
     system_msg = next((m.content for m in body.messages if m.role == "system"), None)
 
     real_model = None if (body.model or "").strip() in ("", "ontology-agent") else body.model
+
+    if body.stream:
+        return StreamingResponse(
+            _stream_agent(body, last_user, system_msg, real_model),
+            media_type="text/event-stream",
+        )
+
     trace = await agent.run(
         user_message=last_user,
         system_prompt=system_msg,
@@ -176,27 +184,6 @@ async def openai_chat_completions(body: OAIChatRequest):
     resp_id = f"chatcmpl-ont-{uuid.uuid4().hex[:16]}"
     resp_model = trace.get("model") or body.model or "qwen2.5-7b"
     created = int(time.time())
-
-    if body.stream:
-        # Continue.dev requires SSE. Agent runs to completion first, then we
-        # emit as a single delta chunk followed by the terminator - streaming
-        # per-token would require restructuring agent.run() to be a generator.
-        async def gen():
-            chunk1 = {
-                "id": resp_id, "object": "chat.completion.chunk",
-                "created": created, "model": resp_model,
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": answer_text}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk1, ensure_ascii=False)}\n\n"
-            chunk2 = {
-                "id": resp_id, "object": "chat.completion.chunk",
-                "created": created, "model": resp_model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "ontology_trace": {"iterations": trace.get("iterations"), "tool_calls": trace.get("tool_calls", [])},
-            }
-            yield f"data: {json.dumps(chunk2, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(gen(), media_type="text/event-stream")
 
     return {
         "id": resp_id,
@@ -227,3 +214,77 @@ async def openai_list_models() -> dict:
             "owned_by": "tangunsoft",
         }],
     }
+
+
+_DONE = object()
+
+
+async def _stream_agent(body: OAIChatRequest, user_msg: str, system_msg: str | None, real_model: str | None):
+    """SSE generator that shows tool calls in real time as they happen.
+
+    Uses an asyncio.Queue as a bridge: agent.run() executes in a background task
+    and pushes events via on_event; this generator drains the queue and yields
+    OpenAI-format chunks so Continue.dev renders each step as it arrives.
+    """
+    resp_id = f"chatcmpl-ont-{uuid.uuid4().hex[:16]}"
+    resp_model = body.model or "ontology-agent"
+    created = int(time.time())
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def chunk(text: str, finish: str | None = None) -> str:
+        payload = {
+            "id": resp_id, "object": "chat.completion.chunk",
+            "created": created, "model": resp_model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": text} if text else {},
+                "finish_reason": finish,
+            }],
+        }
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def on_event(evt: dict) -> None:
+        t = evt.get("type")
+        if t == "thinking":
+            await queue.put(f"\n> 🤔 생각 중... (iteration {evt['iteration']})\n")
+        elif t == "tool_call":
+            await queue.put(f"\n> 🔧 `{evt['name']}` 호출\n> 인자: `{evt['arguments']}`\n")
+        elif t == "tool_result":
+            await queue.put(f"> ✓ 결과: {evt['summary']}\n\n")
+
+    async def run_agent():
+        try:
+            trace = await agent.run(
+                user_message=user_msg,
+                system_prompt=system_msg,
+                model=real_model,
+                temperature=body.temperature if body.temperature is not None else 0.2,
+                max_tokens=body.max_tokens if body.max_tokens is not None else 1024,
+                on_event=on_event,
+            )
+            await queue.put(("FINAL", trace))
+        except Exception as e:
+            await queue.put(("ERROR", str(e)))
+        finally:
+            await queue.put(_DONE)
+
+    asyncio.create_task(run_agent())
+
+    final_answer = ""
+    while True:
+        item = await queue.get()
+        if item is _DONE:
+            break
+        if isinstance(item, tuple):
+            kind, payload = item
+            if kind == "FINAL":
+                final_answer = payload.get("answer", "")
+            elif kind == "ERROR":
+                yield chunk(f"\n\n[error: {payload}]")
+            continue
+        yield chunk(item)
+
+    if final_answer:
+        yield chunk("\n---\n\n" + final_answer)
+    yield chunk("", finish="stop")
+    yield "data: [DONE]\n\n"

@@ -12,8 +12,9 @@ verbs (tools) it can call. This is where "RAG (finding) + Ontology (understandin
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from .. import llm
 from . import tools
@@ -25,8 +26,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "tools like JetBrains and GitHub Enterprise. You have access to the company's "
     "business ontology through tools: customers, contracts, licenses, support "
     "tickets, and vendors are all queryable. When the user asks about renewals, "
-    "at-risk customers, or response plans, USE THE TOOLS - do not guess. Always "
-    "answer in the same language as the user's question. Be concise and factual."
+    "at-risk customers, or response plans, USE THE TOOLS - do not guess. "
+    "LANGUAGE POLICY (STRICT): detect the user's language and answer ONLY in that "
+    "single language. If the user writes in Korean, answer ONLY in Korean. "
+    "NEVER repeat the same answer in another language (especially Chinese). "
+    "NEVER append a translation. One answer, one language. Be concise and factual."
 )
 
 
@@ -42,8 +46,13 @@ async def run(
     max_iterations: int = 5,
     temperature: float = 0.2,
     max_tokens: int = 1024,
+    on_event: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> AgentTrace:
-    """Run the agent loop until a final text answer or iteration limit."""
+    """Run the agent loop until a final text answer or iteration limit.
+
+    on_event: optional async callback invoked at each tool_call and tool_result
+    so a streaming client (SSE wrapper) can show progress in real time.
+    """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
         {"role": "user", "content": user_message},
@@ -55,6 +64,8 @@ async def run(
 
     while iterations < max_iterations:
         iterations += 1
+        if on_event:
+            await on_event({"type": "thinking", "iteration": iterations})
         resp = await llm.chat(
             messages=messages,
             model=model,
@@ -70,7 +81,6 @@ async def run(
             final_text = choice.get("content") or ""
             break
 
-        # Assistant proposed tool calls -> keep the assistant turn, then execute.
         messages.append({
             "role": "assistant",
             "content": choice.get("content") or "",
@@ -81,7 +91,11 @@ async def run(
             name = fn.get("name", "")
             args_json = fn.get("arguments", "") or ""
             log.info("agent tool_call: %s(%s)", name, args_json)
+            if on_event:
+                await on_event({"type": "tool_call", "name": name, "arguments": args_json})
             result_json = tools.dispatch(name, args_json)
+            if on_event:
+                await on_event({"type": "tool_result", "name": name, "summary": _summarize_result(result_json)})
             tool_calls_log.append({
                 "id": tc.get("id"),
                 "name": name,
@@ -106,3 +120,19 @@ async def run(
         "iterations": iterations,
         "tool_calls": tool_calls_log,
     })
+
+
+def _summarize_result(result_json: str) -> str:
+    try:
+        data = json.loads(result_json)
+    except (ValueError, TypeError):
+        return "완료"
+    if isinstance(data, list):
+        return f"{len(data)}건"
+    if isinstance(data, dict):
+        if "customers" in data and isinstance(data["customers"], list):
+            return f"고객 {len(data['customers'])}건"
+        if "contracts" in data and isinstance(data["contracts"], list):
+            return f"계약 {len(data['contracts'])}건"
+        return "완료"
+    return "완료"
