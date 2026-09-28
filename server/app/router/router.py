@@ -128,19 +128,14 @@ async def chat_completions(
     client_model = (body.model or "").strip() or "<unset>"
     total_start = time.perf_counter()
 
-    # Resolve virtual model alias (e.g. qwen2.5-auto → qwen2.5-7b) exactly
-    # once at the router boundary so downstream (LiteLLM, service functions)
-    # never sees the virtual name.
-    resolved = _resolve_model(body.model)
-    if resolved != body.model:
-        log.info(
-            "router model resolve: %s -> %s",
-            body.model, resolved,
-            extra={"router_request_id": request_id},
-        )
-        body.model = resolved
+    # NOTE: We deliberately do NOT resolve body.model here. Bypass rules
+    # (Rule 4 in particular) and the allowlist check must operate on the
+    # ORIGINAL virtual model name (e.g. `qwen2.5-auto`). Only after we
+    # decide the route do we translate to a real backend model, right
+    # before the downstream call.
 
     if not settings.intent_router_enabled:
+        body.model = _resolve_model(body.model)
         resp = await _proxy_to_litellm(body, request_id, route="plain")
         _log_summary(
             request_id=request_id,
@@ -154,6 +149,7 @@ async def chat_completions(
 
     bypass, reason = _should_bypass(body)
     if bypass:
+        body.model = _resolve_model(body.model)
         resp = await _proxy_to_litellm(body, request_id, route="plain")
         _log_summary(
             request_id=request_id,
@@ -168,6 +164,17 @@ async def chat_completions(
     classifier_start = time.perf_counter()
     route = await classify_intent(body)
     classifier_ms = int((time.perf_counter() - classifier_start) * 1000)
+
+    # Now that the classifier has decided, translate the virtual alias
+    # to a real backend model exactly once for the downstream call.
+    resolved = _resolve_model(body.model)
+    if resolved != body.model:
+        log.info(
+            "router model resolve: %s -> %s",
+            body.model, resolved,
+            extra={"router_request_id": request_id},
+        )
+        body.model = resolved
 
     if settings.intent_router_shadow:
         log.info(
