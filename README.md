@@ -196,6 +196,36 @@ BASE=https://llm.tangunsoft.com ./scripts/smoke_test.sh
 
 전체 이슈 리스트: [`Issues`](../../issues?q=is%3Aissue)
 
+### 이슈 진입 지도
+
+```mermaid
+flowchart TB
+    Start([처음 왔음]) --> Q{원하는 것?}
+
+    Q -->|큰 그림·로드맵| E[Epic / Umbrella]
+    Q -->|진행 중 작업| W[활성 작업 이슈]
+    Q -->|블로그 발행 이력| T[Notion Draft 발행 추적]
+    Q -->|과거 버그| B[BUGLOG.md 내부 순번]
+
+    E --> E1["#16 인제스트 파이프라인"]
+    E --> E2["#35 P5 v2 Ontology Umbrella"]
+    E --> E3["#37 P5 v3 Intent Router"]
+
+    W --> W1["feat/&lt;slug&gt;-&lt;이슈번호&gt;"]
+    W --> W2["fix/&lt;slug&gt;-&lt;이슈번호&gt;"]
+
+    T --> T1["#42 Living Document<br/>발행 완료 · 발행 대기"]
+    T --> T2["개별 [Notion Draft] 이슈"]
+
+    B --> B1["fix/buglog-&lt;N&gt;-&lt;slug&gt;"]
+
+    style Start fill:#f9f
+    style E fill:#4ecdc4,color:white
+    style W fill:#ff6b35,color:white
+    style T fill:#90EE90
+    style B fill:#ffd700
+```
+
 ### 이슈 종류별 진입점
 
 - **Epic / Umbrella 로드맵** — 여러 sub-issue 를 묶는 상위 트래킹
@@ -217,6 +247,30 @@ BASE=https://llm.tangunsoft.com ./scripts/smoke_test.sh
 - **BUGLOG 내부 항목** — `docs/BUGLOG.md` 의 순번 (`#1, #2, ...`)
   - GitHub 이슈와 **별개** 트래킹 (프로젝트 내부 running journal)
   - 브랜치 명명: `fix/buglog-N-<slug>` (예: `fix/buglog-6-and-tool-coverage` → BUGLOG.md `#6 Chroma HNSW ...` 항목 해결)
+
+### Notion Draft → 블로그 발행 워크플로우
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 작성자
+    participant Draft as docs/notion-drafts/
+    participant Issue as [Notion Draft] 이슈
+    participant Skill as notion-blog-writer
+    participant Notion as Notion API
+    participant Blog as blog.tangunsoft.com
+    participant Tracker as #42 Tracker
+
+    U->>Draft: YYYY-MM-DD-slug.md 커밋
+    U->>Issue: 개별 이슈 생성 (아이디어 트래킹)
+    Draft->>Skill: 스킬 로드 (Best Practice 태그 등)
+    Skill->>Notion: POST /pages (Status=Private)
+    U->>Notion: Public 승격 (PATCH status=Public)
+    Notion->>Blog: 3-step refresh<br/>download-images<br/>+ service restart<br/>+ ISR revalidate
+    Blog-->>U: HTTPS 200 렌더 확인
+    U->>Tracker: 발행 완료 코멘트 추가
+    U->>Issue: 개별 이슈 Close
+```
 
 ### 처음 왔으면 여기부터
 
