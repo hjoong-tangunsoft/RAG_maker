@@ -210,6 +210,7 @@ flowchart TB
     E --> E1["#16 인제스트 파이프라인"]
     E --> E2["#35 P5 v2 Ontology Umbrella"]
     E --> E3["#37 P5 v3 Intent Router"]
+    E --> E4["#45 P6 Knowledge Graph"]
 
     W --> W1["feat/&lt;slug&gt;-&lt;이슈번호&gt;"]
     W --> W2["fix/&lt;slug&gt;-&lt;이슈번호&gt;"]
@@ -233,6 +234,7 @@ flowchart TB
   - [#35](../../issues/35) — [P5 v2] Tangunsoft Business Ontology (Umbrella)
   - [#37](../../issues/37) — P5 v3 Intent Router (RAG/Ontology 자동 라우팅)
   - [#42](../../issues/42) — **Notion Draft → Blog 발행 추적** (Living Document — 모든 블로그 발행 상태가 여기 모임)
+  - [#45](../../issues/45) — **[P6] Knowledge Graph 도입** (RAG+Ontology → GraphRAG 진화 로드맵, 학습 병행)
 
 - **작업 이슈 (feature / bug)** — 단일 스코프 구현. 브랜치와 1:1 매칭
   - 브랜치 명명: `feat/<slug>-<이슈번호>` (예: `feat/intent-router-37`) 또는 `fix/<slug>-<이슈번호>`
@@ -275,6 +277,6 @@ sequenceDiagram
 ### 처음 왔으면 여기부터
 
 1. **뭐가 진행 중인지**: [Issues (Open)](../../issues?q=is%3Aissue+is%3Aopen)
-2. **로드맵 큰 그림**: [Epic #16](../../issues/16), [#35](../../issues/35), [#37](../../issues/37)
+2. **로드맵 큰 그림**: [Epic #16](../../issues/16), [#35](../../issues/35), [#37](../../issues/37), [#45](../../issues/45)
 3. **블로그 발행 이력·대기**: [#42 tracker](../../issues/42) body 를 열면 상단 = 발행 완료, 하단 = 대기 리스트
 4. **최근 해결한 버그**: [`docs/BUGLOG.md`](docs/BUGLOG.md)
