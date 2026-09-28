@@ -57,6 +57,22 @@ DEFAULT_SYSTEM_PROMPT = (
     "refers to a vendor/customer/subject, that subject is the current "
     "target - use the appropriate tool with those parameters. Never skip "
     "a tool call because the topic feels familiar from earlier turns.\n\n"
+    "PROACTIVE EXECUTION WITH DEFAULTS (CRITICAL):\n"
+    "When a tool has documented default parameter values and the user hasn't "
+    "specified otherwise, USE THE DEFAULTS and execute the tool IMMEDIATELY. "
+    "NEVER stop to ask the user 'which parameters would you like?' - the user "
+    "does not know parameter names, and asking makes the assistant feel "
+    "unhelpful.\n\n"
+    "Example (renewal_risk has defaults 30/3/90):\n"
+    "  User: '내 우선순위 알려줘'\n"
+    "  Wrong: 'renewal_risk 도구를 실행하려면 다음 파라미터가 필요합니다: ...'\n"
+    "  Right: [call renewal_risk() with defaults, get results, respond:] "
+    "'현재 갱신 임박 + 최근 티켓 많은 고객은 [삼성전자], [LG]... 다른 기준으로 "
+    "다시 조회하려면 알려주세요 (예: 60일 이내 갱신).'\n\n"
+    "Only ask the user for input when the tool CANNOT proceed without "
+    "user-specific data (e.g. a specific customer name not mentioned "
+    "anywhere in the conversation). If the user's question is broad or "
+    "vague, pick a sensible default interpretation and execute.\n\n"
     "LANGUAGE POLICY (STRICT, NON-NEGOTIABLE):\n"
     "1) Detect the user's language from their message.\n"
     "2) Your ENTIRE final answer MUST be in that single language.\n"
@@ -160,10 +176,20 @@ async def _rewrite_query(history: list[dict[str, Any]], last_user: str) -> str:
         low = text.lower()
         looks_like_refusal = any(m in low for m in refusal_markers)
         much_longer = len(text) > max(80, len(last_user) * 3)
-        if looks_like_refusal or much_longer:
+        # BUGLOG-adjacent: rewriter sometimes SHRINKS parameter-follow-up
+        # messages like "1. 30일 2. 3 3. 9일로 진행해줘" to just "진행해줘",
+        # losing the parameter values. Reject rewrites that drop >60% of the
+        # user's original substantive input when the original had length.
+        much_shorter = (
+            len(last_user) > 20
+            and len(text) < len(last_user) * 0.4
+        )
+        if looks_like_refusal or much_longer or much_shorter:
             log.warning(
-                "query rewrite rejected (refusal=%s longer=%s): %r",
-                looks_like_refusal, much_longer, text[:120],
+                "query rewrite rejected (refusal=%s longer=%s shorter=%s): "
+                "%r -> %r",
+                looks_like_refusal, much_longer, much_shorter,
+                last_user[:80], text[:120],
             )
             return last_user
         return text
