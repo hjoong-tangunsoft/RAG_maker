@@ -4,8 +4,9 @@ Step 1 baseline: `INTENT_ROUTER_ENABLED=false` → LiteLLM plain-proxy.
 Step 2: protocol bypass rules (mellum, tools present, tool_calls history,
 allowlist).
 Step 3: B2 LLM classifier decides 'plain' | 'rag' | 'ontology'.
+Step 4: dispatch to extracted service functions (no HTTP self-call).
 
-Dispatch (Step 4) and observability (Step 5) still pending.
+Observability (Step 5) still pending.
 
 Rollout gate: env `INTENT_ROUTER_ENABLED` and `INTENT_ROUTER_SHADOW`.
 """
@@ -20,6 +21,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import llm
 from ..config import settings
 from ..schemas import ChatCompletionRequest
+from ..services.ontology_chat import ontology_chat_service
+from ..services.rag_chat import rag_chat_service
 from .intent import classify_intent
 
 log = logging.getLogger("router")
@@ -94,8 +97,24 @@ async def chat_completions(
     route = await classify_intent(body)
     log.info("router classified: route=%s", route)
 
-    # TODO Step 4: dispatch to plain/rag/ontology
-    # TODO Step 5: observability
+    # TODO Step 5: observability (router_request_id, LiteLLM metadata)
+    return await _dispatch(route, body, request)
+
+
+async def _dispatch(
+    route: str,
+    body: ChatCompletionRequest,
+    request: Request,
+) -> Any:
+    """Dispatch to the extracted service function for the given route.
+
+    Unknown routes plain-proxy (defensive fallback). Service functions
+    are called as regular Python awaits - no internal HTTP self-call.
+    """
+    if route == "rag":
+        return await rag_chat_service(body, request)
+    if route == "ontology":
+        return await ontology_chat_service(body)
     return await _proxy_to_litellm(body)
 
 
