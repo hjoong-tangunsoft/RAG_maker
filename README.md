@@ -188,6 +188,39 @@ BASE=https://llm.tangunsoft.com ./scripts/smoke_test.sh
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 시스템 아키텍처 상세 설명 (개념/구조/흐름/용어)
 - [`docs/DESIGN_PRINCIPLES.md`](docs/DESIGN_PRINCIPLES.md) — 자동 인제스트 파이프라인 설계 원칙 (Dumb Server, Smart Client)
+- [`docs/BUGLOG.md`](docs/BUGLOG.md) — 프로젝트 내부 버그 트래킹 (GitHub 이슈와 별개, `#1, #2, ...` 순번)
 - 블로그 [사내 RAG 완전 구축기](https://blog.tangunsoft.com/rag-setup-fastapi-chroma-vllm) — 전체 구축 여정 (Post 1)
 - 블로그 [자동 인제스트 파이프라인 - Dumb Server, Smart Client](https://blog.tangunsoft.com/rag-dumb-server-smart-client) — 설계 원칙 상세 (Post 2)
-- 로드맵 [Epic #16](https://github.com/hjoong-tangunsoft/RAG_maker/issues/16) — 자동 인제스트 파이프라인 구축 4단계
+
+## 이슈 관리 구조
+
+전체 이슈 리스트: [`Issues`](../../issues?q=is%3Aissue)
+
+### 이슈 종류별 진입점
+
+- **Epic / Umbrella 로드맵** — 여러 sub-issue 를 묶는 상위 트래킹
+  - [Epic #16](../../issues/16) — 데이터 인제스트 자동화 파이프라인 4단계 로드맵
+  - [#35](../../issues/35) — [P5 v2] Tangunsoft Business Ontology (Umbrella)
+  - [#37](../../issues/37) — P5 v3 Intent Router (RAG/Ontology 자동 라우팅)
+  - [#42](../../issues/42) — **Notion Draft → Blog 발행 추적** (Living Document — 모든 블로그 발행 상태가 여기 모임)
+
+- **작업 이슈 (feature / bug)** — 단일 스코프 구현. 브랜치와 1:1 매칭
+  - 브랜치 명명: `feat/<slug>-<이슈번호>` (예: `feat/intent-router-37`) 또는 `fix/<slug>-<이슈번호>`
+  - 이슈 close = 브랜치 병합 완료 + main 반영 확인
+
+- **Notion Draft 이슈** — 블로그 게시 후보 아이디어 트래킹
+  - 형식: `[Notion Draft] <제목>`
+  - Draft 파일 위치: `docs/notion-drafts/YYYY-MM-DD-slug.md`
+  - 워크플로우: 초안 커밋 → Notion 게시 (`notion-blog-writer` skill) → `#42` tracker 이관 → draft 이슈 close
+  - 자동 close 아님. 발행 후 수동 close 필요.
+
+- **BUGLOG 내부 항목** — `docs/BUGLOG.md` 의 순번 (`#1, #2, ...`)
+  - GitHub 이슈와 **별개** 트래킹 (프로젝트 내부 running journal)
+  - 브랜치 명명: `fix/buglog-N-<slug>` (예: `fix/buglog-6-and-tool-coverage` → BUGLOG.md `#6 Chroma HNSW ...` 항목 해결)
+
+### 처음 왔으면 여기부터
+
+1. **뭐가 진행 중인지**: [Issues (Open)](../../issues?q=is%3Aissue+is%3Aopen)
+2. **로드맵 큰 그림**: [Epic #16](../../issues/16), [#35](../../issues/35), [#37](../../issues/37)
+3. **블로그 발행 이력·대기**: [#42 tracker](../../issues/42) body 를 열면 상단 = 발행 완료, 하단 = 대기 리스트
+4. **최근 해결한 버그**: [`docs/BUGLOG.md`](docs/BUGLOG.md)
