@@ -5,18 +5,20 @@ Step 2: protocol bypass rules (mellum, tools present, tool_calls history,
 allowlist).
 Step 3: B2 LLM classifier decides 'plain' | 'rag' | 'ontology'.
 Step 4: dispatch to extracted service functions (no HTTP self-call).
-
-Observability (Step 5) still pending.
+Step 5: observability (router_request_id, latency, LiteLLM metadata,
+shadow mode).
 
 Rollout gate: env `INTENT_ROUTER_ENABLED` and `INTENT_ROUTER_SHADOW`.
 """
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .. import llm
 from ..config import settings
@@ -28,6 +30,8 @@ from .intent import classify_intent
 log = logging.getLogger("router")
 
 router = APIRouter(prefix="/router/v1", tags=["intent-router"])
+
+_HEADER_REQUEST_ID = "X-Router-Request-Id"
 
 
 def _parse_csv_setting(csv: str) -> list[str]:
@@ -71,6 +75,18 @@ def _should_bypass(body: ChatCompletionRequest) -> tuple[bool, str]:
     return False, ""
 
 
+def _attach_request_id(resp: Any, request_id: str) -> Any:
+    """Attach X-Router-Request-Id header to a Starlette Response.
+
+    Passes StreamingResponse through unchanged too (it's a Response
+    subclass so `.headers` works). Returns other objects (like raw
+    dicts from unexpected paths) unchanged.
+    """
+    if isinstance(resp, Response):
+        resp.headers[_HEADER_REQUEST_ID] = request_id
+    return resp
+
+
 @router.post("/chat/completions")
 async def chat_completions(
     body: ChatCompletionRequest,
@@ -78,27 +94,79 @@ async def chat_completions(
 ) -> Any:
     """Intent-router entrypoint.
 
-    Step 1: `INTENT_ROUTER_ENABLED=false` (default) → LiteLLM plain-proxy.
-    Step 2: bypass rules match → plain-proxy with logged reason.
+    Flow:
+    1. Disabled → plain-proxy (Step 1 baseline).
+    2. Bypass rules match → plain-proxy with logged reason (Step 2).
+    3. Classify intent via B2 LLM tool-calling (Step 3).
+    4. Shadow mode → log the decision but return plain-proxy (Step 5).
+    5. Dispatch to the extracted service function (Step 4).
 
-    Later steps (3-5) plug in:
-    - B2 LLM classifier
-    - Dispatch to plain/rag/ontology services
-    - `router_request_id` observability + LiteLLM metadata
+    Every branch generates a router_request_id (UUID4), measures
+    latency, and threads the id into LiteLLM metadata on the plain-proxy
+    path for LiteLLM_SpendLogs join.
     """
+    request_id = uuid.uuid4().hex
+    client_model = (body.model or "").strip() or "<unset>"
+    total_start = time.perf_counter()
+
     if not settings.intent_router_enabled:
-        return await _proxy_to_litellm(body)
+        resp = await _proxy_to_litellm(body, request_id, route="plain")
+        _log_summary(
+            request_id=request_id,
+            client_model=client_model,
+            route="plain",
+            bypass_reason="router_disabled",
+            classifier_ms=0,
+            total_start=total_start,
+        )
+        return _attach_request_id(resp, request_id)
 
     bypass, reason = _should_bypass(body)
     if bypass:
-        log.info("router bypass: %s", reason)
-        return await _proxy_to_litellm(body)
+        resp = await _proxy_to_litellm(body, request_id, route="plain")
+        _log_summary(
+            request_id=request_id,
+            client_model=client_model,
+            route="plain",
+            bypass_reason=reason,
+            classifier_ms=0,
+            total_start=total_start,
+        )
+        return _attach_request_id(resp, request_id)
 
+    classifier_start = time.perf_counter()
     route = await classify_intent(body)
-    log.info("router classified: route=%s", route)
+    classifier_ms = int((time.perf_counter() - classifier_start) * 1000)
 
-    # TODO Step 5: observability (router_request_id, LiteLLM metadata)
-    return await _dispatch(route, body, request)
+    if settings.intent_router_shadow:
+        log.info(
+            "router shadow: classified route=%s, returning plain-proxy",
+            route,
+            extra={"router_request_id": request_id, "shadow_route": route},
+        )
+        resp = await _proxy_to_litellm(
+            body, request_id, route="plain", shadow_route=route,
+        )
+        _log_summary(
+            request_id=request_id,
+            client_model=client_model,
+            route="plain",
+            bypass_reason=f"shadow(would_route={route})",
+            classifier_ms=classifier_ms,
+            total_start=total_start,
+        )
+        return _attach_request_id(resp, request_id)
+
+    resp = await _dispatch(route, body, request)
+    _log_summary(
+        request_id=request_id,
+        client_model=client_model,
+        route=route,
+        bypass_reason="",
+        classifier_ms=classifier_ms,
+        total_start=total_start,
+    )
+    return _attach_request_id(resp, request_id)
 
 
 async def _dispatch(
@@ -110,21 +178,45 @@ async def _dispatch(
 
     Unknown routes plain-proxy (defensive fallback). Service functions
     are called as regular Python awaits - no internal HTTP self-call.
+
+    NOTE: LiteLLM metadata (router_request_id) is only injected on the
+    plain-proxy path today. RAG/Ontology routes still get log-based
+    correlation via router_request_id but no LiteLLM_SpendLogs metadata.
+    Threading metadata into those services is a future improvement.
     """
     if route == "rag":
         return await rag_chat_service(body, request)
     if route == "ontology":
         return await ontology_chat_service(body)
-    return await _proxy_to_litellm(body)
+    return await _proxy_to_litellm(body, request_id=None, route="plain")
 
 
-async def _proxy_to_litellm(body: ChatCompletionRequest) -> Any:
-    """Direct passthrough to LiteLLM. Used when router is off/bypassed.
+async def _proxy_to_litellm(
+    body: ChatCompletionRequest,
+    request_id: str | None,
+    route: str,
+    shadow_route: str | None = None,
+) -> Any:
+    """Direct passthrough to LiteLLM. Used when router is off/bypassed/shadow.
 
     Preserves the whole ChatCompletionRequest (including tools/tool_choice)
     so the caller sees identical behavior to /v1/chat/completions.
+
+    When `request_id` is provided, injects it as LiteLLM metadata so
+    LiteLLM_SpendLogs rows carry the correlation id. `shadow_route`
+    (if set) records what the classifier WOULD have chosen.
     """
     messages = [m.model_dump(exclude_none=True) for m in body.messages]
+
+    extra: dict[str, Any] | None = None
+    if request_id:
+        metadata: dict[str, Any] = {
+            "router_request_id": request_id,
+            "route": route,
+        }
+        if shadow_route is not None:
+            metadata["shadow_route"] = shadow_route
+        extra = {"metadata": metadata}
 
     if body.stream:
         async def gen():
@@ -135,6 +227,7 @@ async def _proxy_to_litellm(body: ChatCompletionRequest) -> Any:
                 max_tokens=body.max_tokens,
                 tools=body.tools,
                 tool_choice=body.tool_choice,
+                extra=extra,
             ):
                 yield chunk
         return StreamingResponse(gen(), media_type="text/event-stream")
@@ -146,5 +239,37 @@ async def _proxy_to_litellm(body: ChatCompletionRequest) -> Any:
         max_tokens=body.max_tokens,
         tools=body.tools,
         tool_choice=body.tool_choice,
+        extra=extra,
     )
     return JSONResponse(resp)
+
+
+def _log_summary(
+    *,
+    request_id: str,
+    client_model: str,
+    route: str,
+    bypass_reason: str,
+    classifier_ms: int,
+    total_start: float,
+) -> None:
+    """Emit the per-request summary log line with all observability fields."""
+    total_ms = int((time.perf_counter() - total_start) * 1000)
+    log.info(
+        "router rid=%s client_model=%s route=%s bypass=%s "
+        "classifier_ms=%d total_ms=%d",
+        request_id,
+        client_model,
+        route,
+        bypass_reason or "-",
+        classifier_ms,
+        total_ms,
+        extra={
+            "router_request_id": request_id,
+            "client_model": client_model,
+            "route": route,
+            "bypass_reason": bypass_reason,
+            "classifier_latency_ms": classifier_ms,
+            "total_latency_ms": total_ms,
+        },
+    )
