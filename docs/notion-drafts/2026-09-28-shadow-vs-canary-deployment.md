@@ -132,25 +132,49 @@ curl -sk https://llm.tangunsoft.com/ontology/v1/models   # HTTP 200 유지
 
 기존 endpoint 는 새 `services/rag_chat.py` · `services/ontology_chat.py` 서비스 함수를 감싸는 **얇은 wrapper** 로 축소되어 있어서 로직 자체는 동일 (Step 4 리팩터). 회귀 위험 최소.
 
-## 왜 Shadow 없이 바로 Canary 가 위험한가
+## 왜 Shadow 없이 바로 Canary 가 위험한가 — "조용한 버그" 라는 개념
 
-앞서 언급한 Shadow 로 잡은 버그 3개를 다시 보자.
+Shadow 와 Canary 를 나누는 근본 이유는 **버그의 두 가지 성격** 때문이다.
 
-- **Bug 1 (model alias)** 은 배포 직후 첫 요청부터 500 에러. Rollback 까지 최소 30초-1분 사용자 노출.
-- **Bug 2 (resolve 순서)** 는 500 에러는 아니지만 classifier 가 실질적으로 죽어 있음. 정상처럼 보여서 감지가 늦어짐. Canary 만 있었으면 며칠 후에 "왜 라우팅이 안 되지?" 라고 뒤늦게 발견했을 것.
-- **Bug 3 (Rule 2)** 은 사용자 응답이 여전히 "옛날처럼 이상함" 이라서 사용자 불평이 없음. 시간이 지나도 문제 인지 못 함.
+### 시끄러운 버그 vs 조용한 버그
 
-Shadow 는 이 3가지를 **모두 로그 관측 단계에서 조기 감지**했다. Canary 는 이런 감지 능력이 없다 (사용자 눈에 정상처럼 보이는 버그를 못 잡음).
+| 종류 | 사용자 눈에 보이는가 | 감지 방법 | 대표 사례 |
+|---|---|---|---|
+| **시끄러운 버그** | 즉시 보임 (HTTP 500, 응답 이상) | Canary 로도 충분 | 의존성 누락, 문법 에러, 명백한 크래시 |
+| **조용한 버그** | 안 보임 (응답은 정상처럼 나옴) | 오직 로그로만 감지 | 잘못된 라우팅, 의도된 분기의 코드 사문화, 무한 fallback |
 
-## 왜 Canary 없이 Shadow 만으로 끝나면 안 되나
+Canary 는 사용자한테 새 응답을 실제로 노출하니 시끄러운 버그는 쉽게 잡는다. 하지만 조용한 버그는 사용자 응답이 여전히 "정상처럼" 보이니 사용자도 관리자도 이상함을 못 느낀다. 시간이 지나도 아무도 문제 인지 못 함.
 
-Shadow 는 classifier 만 검증한다. 실제 dispatch 경로 (`rag_chat_service` 안의 retrieval 코드, `ontology_chat_service` 안의 agent iteration 코드) 는 **한 번도 실행되지 않는다**. 배포된 신규 코드의 절반이 검증 안 된 채로 남아 있는 것.
+Shadow 는 이 조용한 버그를 **자동 로그 관측** 으로 잡는다. 사용자가 눈치채지 못하는 내부 상태 이상 (classifier 가 안 돌고 있음, 특정 규칙이 100% 발화 중, 의도된 dispatch 경로가 사문화됨) 을 로그 통계로 감지한다.
 
-Canary 는 이 나머지 절반을 실사용으로 검증한다:
+### 앞서 언급한 3개 버그를 이 프레임으로 재분류
 
-- RAG dispatch: retrieval 이 실제로 관련 문서를 찾아오는가, citation 이 올바르게 붙는가
-- Ontology dispatch: agent 가 올바른 tool 을 호출하는가, DB 조회 결과가 정확한 응답으로 조립되는가
-- End-to-end latency: RAG (검색 포함) 약 3-5초, Ontology (agent iteration) 약 5-10초 — 사용자 체감 가능한가
+**Bug 1 (model alias 미변환)** — **시끄러운 버그**
+- 증상: 모든 요청 HTTP 500
+- Shadow 든 Canary 든 관리자 IDE 에서 즉시 발견 가능
+- Shadow 의 추가 이점: 사용자 노출 전에 잡음
+
+**Bug 2 (Resolve 순서 오류)** — **조용한 버그** ⭐
+- 증상: 응답은 정상 (plain-proxy), 하지만 classifier 가 실질적으로 죽어있음
+- Canary 만 있었으면 관리자 IDE 에서 "왜 라우팅 안 되지" 라고 뒤늦게 며칠 후 발견
+- Shadow 로그의 `bypass=model=qwen2.5-7b not in allowed_models classifier_ms=0` 패턴으로만 감지
+
+**Bug 3 (Bypass Rule 2 과잉 발화)** — **조용한 버그** ⭐
+- 증상: 사용자한테 나가는 응답 = "옛날처럼 코드 어시스턴트 모드" (배포 전과 100% 동일)
+- Canary 만 있었으면 사용자도 관리자도 응답 자체는 정상이라 이상 못 느낌
+- Shadow 로그 통계 `5 bypass=tools_in_request` (100% 발화) 로만 감지
+
+### 왜 조용한 버그가 더 위험한가
+
+- **시끄러운 버그**: 발견 즉시 rollback 필요 = 명확한 대응
+- **조용한 버그**: 발견이 늦어짐 = 신규 코드가 "동작 안 하는데도 배포된 채로 방치" = **롤아웃 계획 전체가 무의미해짐**
+
+이번 세션의 Rule 2 버그가 딱 이 케이스였다. 만약 Shadow 없이 Canary 로 바로 갔으면:
+- 사용자 응답: "옛날처럼 이상함" (배포 전에도 이랬으니 정상)
+- 관리자 인지: "다른 팀원한테 canary 확장해도 되겠네" (사실 classifier 는 돌지도 않고 있는데)
+- 몇 주 후: 우연히 로그 뒤지다 "어? classifier_ms=0 이 왜 계속 나오지" 라고 발견
+
+Shadow 는 이 시나리오를 **첫 1시간 안에** 잡는다. 로그 통계만 봐도 `bypass=tools_in_request` 가 100% 라는 이상 패턴이 즉시 드러남.
 
 ## Rollback 전략
 
