@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from . import embed, ingest, llm, rag
 from .ontology.router import router as ontology_router
+from .router import router_router
 from .chunker import chunk_text
 from .config import settings
 from .jira_meta import parse_jira_metadata
@@ -77,6 +78,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="RAG service", version="1.0.0", lifespan=lifespan)
 app.include_router(ontology_router)
+app.include_router(router_router)
 
 
 # ---------- auth dependency ----------

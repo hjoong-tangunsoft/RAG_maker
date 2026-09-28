@@ -93,6 +93,23 @@ class Settings(BaseSettings):
     # see sources rendered as text. Disable to keep pure LLM output.
     append_citations_to_body: bool = True
 
+    # Intent Router (Issue #37, P5 v3).
+    # POST /router/v1/chat/completions classifies user intent (plain/rag/
+    # ontology) via LLM tool-calling and dispatches to the appropriate
+    # service. When disabled (default), the endpoint plain-proxies to
+    # LiteLLM for a safe rollout baseline. Legacy /rag/v1 and /ontology/v1
+    # remain for backward compat (deprecated but supported).
+    intent_router_enabled: bool = False
+    # Shadow mode: run classifier + dispatch but log-only (no user impact).
+    # Reserved for step 5 observability rollout.
+    intent_router_shadow: bool = False
+    # Comma-separated model names that route through classifier.
+    intent_router_allowed_models: str = "qwen2.5-auto"
+    # Comma-separated model names that always bypass classifier (e.g. autocomplete).
+    intent_router_bypass_models: str = "mellum-4b"
+    # Fallback route when classifier is uncertain.
+    intent_router_default: str = "plain"
+
 
 settings = Settings()
 
