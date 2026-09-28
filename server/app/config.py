@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # Comma-separated model names that always bypass classifier (e.g. autocomplete).
     intent_router_bypass_models: str = "mellum-4b"
     # Fallback route when classifier is uncertain.
-    intent_router_default: str = "plain"
+    intent_router_default: str = "rag"
 
 
 settings = Settings()
