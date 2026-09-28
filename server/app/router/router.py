@@ -2,8 +2,10 @@
 
 Step 1 baseline: `INTENT_ROUTER_ENABLED=false` → LiteLLM plain-proxy.
 Step 2: protocol bypass rules (mellum, tools present, tool_calls history,
-allowlist). Full dispatch (B2 classifier, service dispatch, observability)
-ships in Steps 3-5.
+allowlist).
+Step 3: B2 LLM classifier decides 'plain' | 'rag' | 'ontology'.
+
+Dispatch (Step 4) and observability (Step 5) still pending.
 
 Rollout gate: env `INTENT_ROUTER_ENABLED` and `INTENT_ROUTER_SHADOW`.
 """
@@ -18,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .. import llm
 from ..config import settings
 from ..schemas import ChatCompletionRequest
+from .intent import classify_intent
 
 log = logging.getLogger("router")
 
@@ -88,7 +91,9 @@ async def chat_completions(
         log.info("router bypass: %s", reason)
         return await _proxy_to_litellm(body)
 
-    # TODO Step 3: B2 classifier
+    route = await classify_intent(body)
+    log.info("router classified: route=%s", route)
+
     # TODO Step 4: dispatch to plain/rag/ontology
     # TODO Step 5: observability
     return await _proxy_to_litellm(body)
