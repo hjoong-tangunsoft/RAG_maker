@@ -47,20 +47,26 @@ def _should_bypass(body: ChatCompletionRequest) -> tuple[bool, str]:
 
     Rules:
     1. Model is in `INTENT_ROUTER_BYPASS_MODELS` (e.g. autocomplete).
-    2. Request has `tools` array (client is orchestrating tool_calls).
-    3. Message history contains a tool response or an assistant tool_call
-       (multi-turn tool-calling conversation).
-    4. Model is not in `INTENT_ROUTER_ALLOWED_MODELS` (only allowlisted
+    2. Message history contains a tool response or an assistant tool_call
+       (multi-turn tool-calling conversation - client is mid-orchestration
+       and the router must not interrupt).
+    3. Model is not in `INTENT_ROUTER_ALLOWED_MODELS` (only allowlisted
        virtual models route through the classifier).
+
+    HISTORICAL NOTE: An earlier version had a "tools_in_request" bypass
+    (Rule 2 in the original handoff §8). It was removed because Continue.dev
+    Agent mode sends 12 tools in EVERY request, so that rule fired 100% of
+    the time and the classifier never ran. Downstream saw filesystem tools
+    like `ls` / `read_file` and answered "단군소프트 매출 알려줘" with a
+    naive `ls` call. See the router.dispatch() docstring for how we strip
+    tools on rag/ontology routes so RAG can inject and Ontology can use
+    its own tools.
     """
     model = (body.model or "").strip()
 
     bypass_models = _parse_csv_setting(settings.intent_router_bypass_models)
     if model in bypass_models:
         return True, f"model={model} in bypass_models"
-
-    if body.tools:
-        return True, "tools_in_request"
 
     for m in body.messages:
         if m.role == "tool":
@@ -217,14 +223,28 @@ async def _dispatch(
     Unknown routes plain-proxy (defensive fallback). Service functions
     are called as regular Python awaits - no internal HTTP self-call.
 
+    Tool handling per route:
+    - `plain`: client tools kept (Continue.dev Agent mode uses them for
+      coding tasks).
+    - `rag`: client tools DROPPED so RAG service's `should_inject_rag`
+      becomes True. Continue.dev's filesystem tools cannot answer
+      company-knowledge questions - the retrieval answer replaces them.
+    - `ontology`: client tools DROPPED so the ontology agent runs its
+      own tools (`list_customers`, `list_customer_contracts`, ...)
+      instead of being confused by Continue.dev's filesystem tools.
+
     NOTE: LiteLLM metadata (router_request_id) is only injected on the
     plain-proxy path today. RAG/Ontology routes still get log-based
     correlation via router_request_id but no LiteLLM_SpendLogs metadata.
     Threading metadata into those services is a future improvement.
     """
     if route == "rag":
+        body.tools = None
+        body.tool_choice = None
         return await rag_chat_service(body, request)
     if route == "ontology":
+        body.tools = None
+        body.tool_choice = None
         return await ontology_chat_service(body)
     return await _proxy_to_litellm(body, request_id=None, route="plain")
 
