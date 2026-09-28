@@ -75,6 +75,25 @@ def _should_bypass(body: ChatCompletionRequest) -> tuple[bool, str]:
     return False, ""
 
 
+def _resolve_model(client_model: str | None) -> str:
+    """Translate virtual model aliases to real backend models.
+
+    Only allowlisted virtual models (INTENT_ROUTER_ALLOWED_MODELS) get
+    resolved to `settings.default_model`. Real models (like `mellum-4b`,
+    `qwen2.5-7b`) pass through unchanged so LiteLLM sees them verbatim.
+
+    Without this, forwarding `qwen2.5-auto` verbatim to LiteLLM fails
+    with `ProxyModelNotFoundError` because that alias only exists in
+    the router's own namespace.
+    """
+    if not client_model:
+        return settings.default_model
+    allowed = _parse_csv_setting(settings.intent_router_allowed_models)
+    if client_model.strip() in allowed:
+        return settings.default_model
+    return client_model
+
+
 def _attach_request_id(resp: Any, request_id: str) -> Any:
     """Attach X-Router-Request-Id header to a Starlette Response.
 
@@ -108,6 +127,18 @@ async def chat_completions(
     request_id = uuid.uuid4().hex
     client_model = (body.model or "").strip() or "<unset>"
     total_start = time.perf_counter()
+
+    # Resolve virtual model alias (e.g. qwen2.5-auto → qwen2.5-7b) exactly
+    # once at the router boundary so downstream (LiteLLM, service functions)
+    # never sees the virtual name.
+    resolved = _resolve_model(body.model)
+    if resolved != body.model:
+        log.info(
+            "router model resolve: %s -> %s",
+            body.model, resolved,
+            extra={"router_request_id": request_id},
+        )
+        body.model = resolved
 
     if not settings.intent_router_enabled:
         resp = await _proxy_to_litellm(body, request_id, route="plain")
