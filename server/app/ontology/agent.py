@@ -50,6 +50,23 @@ DEFAULT_SYSTEM_PROMPT = (
     "(e.g. `renewal_risk(vendor_name=\"X\")` or `rag_search {\"query\": \"X\"}`). "
     "If you need a tool, use the tool_calls channel. Prose must be natural "
     "language for the user, never a code fragment.\n\n"
+    "CRITICAL - NO CODE BLOCKS (ABSOLUTE PROHIBITION):\n"
+    "You are a business assistant, NOT a code generator. NEVER emit ANY of "
+    "the following patterns in your response:\n"
+    "- Triple-backtick code blocks (```python ... ```)\n"
+    "- `import` statements (e.g. `from tools import rag_search`)\n"
+    "- Variable assignments (e.g. `query = \"...\"`, `result = ...`)\n"
+    "- `print(...)` calls\n"
+    "- Function definitions (`def foo():`)\n"
+    "- ANY reference to tool names as if they were Python functions to be "
+    "called from user code (e.g. writing `rag_search({...})` in prose)\n\n"
+    "Wrong: '이 코드를 실행하면 답을 얻을 수 있습니다: ```python from tools "
+    "import rag_search; result = rag_search({\"query\": \"...\"}) ```'\n"
+    "Right: [use the tool_calls channel to invoke rag_search, then respond:] "
+    "'LG전자 관련 최근 지원 티켓은 MAN-176, MAN-178, MAN-179 입니다.'\n\n"
+    "If you find yourself about to write code, STOP and use the tool_calls "
+    "channel instead. The user CANNOT and WILL NOT execute code you show them - "
+    "showing code is a failure mode, not a helpful response.\n\n"
     "CONVERSATION CONTEXT (IMPORTANT):\n"
     "The user message you receive has ALREADY been rewritten to be "
     "self-contained using prior conversation context. Treat it as a "
@@ -396,11 +413,13 @@ def _recover_leaked_tool_call(text: str) -> tuple[str, str] | None:
     """Detect a would-be tool invocation the model wrote as plain text
     instead of via the tool_calls channel. Returns (name, args_json).
 
-    Handles four observed 7B leak shapes anywhere in the string:
+    Handles observed 7B leak shapes anywhere in the string:
       1. name {"k": v}                              (json object literal)
       2. name(k=v, k=v)                             (python-style kwargs)
       3. samsung_id = name(k=v, ...)                (python assignment prefix)
       4. {"name": "tool", "arguments": {"k": v}}    (openai tool-call wrapper)
+      5. name({"k": v})                             (positional dict argument)
+      6. name({"k": var}) + prior `var = "..."`     (variable substitution)
     """
     s = (text or "").strip()
     if not s:
@@ -423,11 +442,67 @@ def _recover_leaked_tool_call(text: str) -> tuple[str, str] | None:
                     if parsed is not None:
                         return name, parsed
                 if tail.startswith("("):
+                    # Shape 2/3: kwargs like name(k=v, ...)
                     parsed = _extract_kwargs_as_json(tail)
                     if parsed is not None:
                         return name, parsed
+                    # Shape 5: positional dict name({"k": v})
+                    inner = tail[1:].lstrip()  # skip opening (
+                    if inner.startswith("{"):
+                        parsed_dict = _extract_json_object(inner)
+                        if parsed_dict is not None:
+                            return name, parsed_dict
+                        # Shape 6: variable substitution — scan for
+                        # var_name = "literal" earlier in the same text
+                        # and substitute into the dict.
+                        substituted = _substitute_python_vars(s, inner)
+                        if substituted is not None:
+                            parsed_sub = _extract_json_object(substituted)
+                            if parsed_sub is not None:
+                                return name, parsed_sub
             idx = hit + len(name)
     return None
+
+
+def _substitute_python_vars(full_text: str, dict_expr: str) -> str | None:
+    """Substitute Python variable references in a dict expression with their
+    string literal values found earlier in the text.
+
+    Handles patterns like:
+        query = "LG전자 최근 90일 지원 티켓 수"
+        rag_search({"query": query, "k": 1})
+
+    Only handles simple `var = "..."` assignments (single quotes or double).
+    Returns the dict_expr with variables replaced by JSON string literals, or
+    None if no variables found or substitution unclear.
+    """
+    import re
+    # Find bare identifiers inside the dict expression (potential variables)
+    # Skip strings ("...") and numbers.
+    # Find all `identifier =` assignments in full_text.
+    # Assignment pattern: `name = "value"` or `name = 'value'`
+    assignments: dict[str, str] = {}
+    for m in re.finditer(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["\']([^"\']*)["\']',
+                         full_text):
+        assignments[m.group(1)] = m.group(2)
+    if not assignments:
+        return None
+    # Substitute identifiers in the dict expression
+    def _replace(match: re.Match[str]) -> str:
+        var = match.group(1)
+        if var in assignments:
+            return json.dumps(assignments[var], ensure_ascii=False)
+        return match.group(0)
+    # Replace bare identifiers not inside strings.
+    # Simple approach: replace `: identifier[,}]` patterns.
+    result = re.sub(
+        r':\s*([A-Za-z_][A-Za-z0-9_]*)(?=\s*[,}])',
+        lambda m: ': ' + _replace(m),
+        dict_expr,
+    )
+    if result == dict_expr:
+        return None
+    return result
 
 
 def _extract_json_object(s: str) -> str | None:
