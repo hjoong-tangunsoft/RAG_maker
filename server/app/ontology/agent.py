@@ -183,6 +183,44 @@ def _is_specific_id_request(text: str) -> bool:
     return any(m in lo for m in english_markers)
 
 
+def _is_priority_question(text: str) -> bool:
+    """Detect broad-priority questions ('내가 처리할 급한 일 있어?',
+    '우선순위 뭐야', etc.) that must trigger renewal_risk with defaults.
+
+    Qwen 7B tends to be polite and ask for user permission before executing
+    (예: 'renewal_risk 도구를 사용하겠습니다') instead of just running.
+    Force tool_choice="required" to skip the polite hesitation.
+    """
+    if not text:
+        return False
+    priority_markers = (
+        "우선순위",         # 우선순위
+        "급한 일",         # 급한 일
+        "급한거",           # 급한거
+        "급한 거",         # 급한 거
+        "급한 이슈",       # 급한 이슈
+        "다급한",           # 다급한
+        "빨리 해야",       # 빨리 해야
+        "위험한 고객",     # 위험한 고객
+        "리스크 높",       # 리스크 높은
+        "리스크 큰",       # 리스크 큰
+        "만료 임박",       # 만료 임박
+        "곧 갱신",         # 곧 갱신
+        "곧 만료",         # 곧 만료
+        "갱신 임박",       # 갱신 임박
+        "갱신관련 급한",   # 갱신관련 급한거
+        "핵심 이슈",       # 핵심 이슈
+        "중요한 이슈",     # 중요한 이슈
+        "먼저 처리",       # 먼저 처리해야
+        "뭐부터",           # 뭐부터 해야
+        "뭐 부터",         # 뭐 부터
+        "지금 뭐 해",      # 지금 뭐 해야
+        "지금 뭘 해",      # 지금 뭘 해야
+        "내가 처리",       # 내가 처리해야
+    )
+    return any(m in text for m in priority_markers)
+
+
 def _has_chinese(text: str) -> bool:
     # CJK Unified Ideographs. Korean answers must not contain Han characters;
     # 7B model sometimes falls back to Chinese for unknown-vocabulary phrases.
@@ -360,13 +398,20 @@ async def run(
         if on_event:
             await on_event({"type": "thinking", "iteration": iterations})
         # Smart tool_choice: force tool use on the first iteration when the
-        # user is asking for specific identifiers (ticket numbers, IDs, 번호).
-        # Prevents Qwen 7B from hallucinating plausible-looking IDs.
+        # user is asking for specific identifiers (ticket numbers, IDs, 번호)
+        # OR asking a broad priority question ('내가 처리할 급한 일 있어?').
+        # Prevents Qwen 7B from hallucinating IDs or being politely
+        # non-committal ('도구를 사용하겠습니다').
         tc_mode: str | dict[str, Any] = "auto"
-        if iterations == 1 and _is_specific_id_request(rewritten):
-            tc_mode = "required"
-            log.info("forcing tool_choice=required (ID request detected): %r",
-                     rewritten[:80])
+        if iterations == 1:
+            if _is_specific_id_request(rewritten):
+                tc_mode = "required"
+                log.info("forcing tool_choice=required (ID request detected): %r",
+                         rewritten[:80])
+            elif _is_priority_question(rewritten):
+                tc_mode = "required"
+                log.info("forcing tool_choice=required (priority question detected): %r",
+                         rewritten[:80])
         resp = await llm.chat(
             messages=messages,
             model=model,
