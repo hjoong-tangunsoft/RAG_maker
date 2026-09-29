@@ -192,6 +192,13 @@ def _has_chinese(text: str) -> bool:
 _REWRITE_SYSTEM = (
     "You rewrite the user's latest message ONLY IF it cannot stand alone. "
     "Most messages are already self-contained and MUST be returned verbatim.\n\n"
+    "CRITICAL: NEVER copy or paraphrase the assistant's previous response. "
+    "You are rewriting the USER's message, not summarizing the assistant's "
+    "previous turn. If the user's follow-up is very short (예: '이슈 말이야', "
+    "'응', '그거') and the assistant's previous turn asked a clarifying question, "
+    "return the user's message VERBATIM. The user is trying to continue the "
+    "topic — let the agent see the original short phrase, not a made-up "
+    "expansion.\n\n"
     "Rules:\n"
     "1) Output ONLY the resulting question. No prefix, no quotes, no "
     "explanation.\n"

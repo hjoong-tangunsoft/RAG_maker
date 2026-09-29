@@ -69,6 +69,9 @@ _CLASSIFIER_SYSTEM_PROMPT = """당신은 탄군소프트 사내 IDE 어시스턴
 여러 최근 사용자 turn 이 `---` 로 구분되어 제공될 수 있습니다.
 후속 turn (예: "우선순위 높은거", "5는 문서잖아") 은 앞 turn 문맥을 반영해서 판단하세요.
 
+**단, 후속 turn 이 완전히 새로운 주제** (예: 개인적/철학적 질문, opinion, 감정, 인간관계) 이면 앞 turn 문맥을 무시하고 last turn 만 보고 판단하세요.
+- 예: 앞 turn "LG전자 갱신관련 급한거" + last turn "엄마부터 찾는 직장동료 어떻게 생각해?" → last turn 은 opinion 질문 → route_plain
+
 정확히 하나의 tool_call 만 반환하세요. 텍스트 답변 절대 금지.
 
 **route_ontology** — Jira/고객/계약/라이선스·업무 상태·업무 우선순위 조회 필요:
@@ -96,15 +99,19 @@ _CLASSIFIER_SYSTEM_PROMPT = """당신은 탄군소프트 사내 IDE 어시스턴
 - "지난번 이 버그 어떻게 해결했지"
 - 회사·팀 문맥의 개념적 질문
 
-**route_plain** — 순수 프로그래밍·상식·잡담 (회사 지식 불필요):
+**route_plain** — 순수 프로그래밍·상식·잡담·opinion·philosophical (회사 지식 불필요):
 - "async 함수 예시", "list vs tuple 차이", "안녕", "고마워"
 - 특정 라이브러리·프레임워크의 일반 사용법
+- **opinion/철학/인간관계/감정 질문**: "~에 대해 어떻게 생각해?", "너 견해는?", "~ 어떤가?", "엄마부터 찾는 직장동료 어떻게 생각해"
+- 순수 개인적 고민·잡담
 
 **금지 사항 (Anti-patterns)**:
 - 사용자한테 "1. A 2. B 3. C 중 뭐 원해요?" 식 카테고리 선택 요구 금지 → 그런 질문이면 일단 route_ontology 로 보내서 agent 가 자체 판단하게 하세요.
 - "우선순위" keyword 가 없어도 "급한거", "높은거" 같은 유의어를 놓치지 마세요.
+- opinion/philosophical 질문을 앞 turn 이 회사 관련이라는 이유로 ontology 로 보내지 마세요. 새 주제면 last turn 만 봐라.
 
-**애매하면 route_rag** — 회사 문서 검색이 더 안전합니다. 검색해서 관련 없으면 어차피 일반 LLM 답변이 나오므로 손해 없음."""
+**애매하면 route_rag** — 회사 문서 검색이 더 안전합니다. 검색해서 관련 없으면 어차피 일반 LLM 답변이 나오므로 손해 없음.
+단, opinion/철학/개인 질문은 route_plain 이 더 정확 (RAG 는 업무 데이터 뿐)."""
 
 
 def _recent_user_content(body: ChatCompletionRequest, n: int = 2) -> str | None:
