@@ -66,41 +66,62 @@ INTENT_TOOLS: list[dict[str, Any]] = [
 _CLASSIFIER_SYSTEM_PROMPT = """당신은 탄군소프트 사내 IDE 어시스턴트의 라우팅 분류기입니다.
 사용자는 회사 직원이며 대부분 업무 문맥에서 질문합니다.
 
+여러 최근 사용자 turn 이 `---` 로 구분되어 제공될 수 있습니다.
+후속 turn (예: "우선순위 높은거", "5는 문서잖아") 은 앞 turn 문맥을 반영해서 판단하세요.
+
 정확히 하나의 tool_call 만 반환하세요. 텍스트 답변 절대 금지.
 
-**route_ontology** — Jira/고객/계약/라이선스 등 관계형 DB 조회 필요:
-- "지금 처리해야 할 우선순위 알려줘"
-- "내 이번 주 할 일"
-- "삼성 고객의 계약 목록"
-- "홍길동이 담당하는 이슈"
-- "이번 달 만료되는 라이선스"
-- "김철수 최근 티켓 상태"
-- 특정 사람/회사/제품명 + "상태·계약·이슈·담당·우선순위"
+**route_ontology** — Jira/고객/계약/라이선스·업무 상태·업무 우선순위 조회 필요:
 
-**route_rag** — 사내 문서·매뉴얼·정책·과거 기록 검색 필요:
-- "우리 회사 매출"
+우선순위·긴급도 표현 (모두 route_ontology):
+- "우선순위", "우선순위 높은거", "먼저 처리해야 할"
+- "급한거", "급한 이슈", "다급한 것", "빨리 해야 할"
+- "위험한 고객", "리스크 높은", "리스크 큰"
+- "만료 임박", "곧 갱신", "곧 만료", "조만간 만료"
+- "중요한 이슈", "핵심 이슈", "치명적인"
+
+업무 상태·담당 표현:
+- "내 이번 주 할 일", "내가 처리해야 할", "지금 뭘 해야"
+- "누가 담당", "담당자", "누구한테 물어봐야"
+- "티켓 많은", "이슈 많은", "지원 요청 많은"
+
+엔티티+속성 조합:
+- "삼성 계약", "LG 라이선스", "홍길동 이슈"
+- 사람/회사/제품명 + "상태·계약·이슈·담당"
+
+**route_rag** — 사내 문서·매뉴얼·정책·과거 기록·컨셉 질문:
+- "우리 회사 매출·정책·가이드라인"
 - "탄군소프트 소개"
 - "우리 프로젝트에서 async 어떻게 쓰는지"
 - "지난번 이 버그 어떻게 해결했지"
-- "가이드라인, 정책, 규정, 표준"
-- 회사·프로젝트·팀 문맥의 개념적 질문
+- 회사·팀 문맥의 개념적 질문
 
-**route_plain** — 순수 프로그래밍·일반 상식·잡담 (회사 지식 불필요):
-- "async 함수 예시"
-- "Python list vs tuple 차이"
-- "def foo() 문법"
-- "안녕, 고마워"
+**route_plain** — 순수 프로그래밍·상식·잡담 (회사 지식 불필요):
+- "async 함수 예시", "list vs tuple 차이", "안녕", "고마워"
 - 특정 라이브러리·프레임워크의 일반 사용법
+
+**금지 사항 (Anti-patterns)**:
+- 사용자한테 "1. A 2. B 3. C 중 뭐 원해요?" 식 카테고리 선택 요구 금지 → 그런 질문이면 일단 route_ontology 로 보내서 agent 가 자체 판단하게 하세요.
+- "우선순위" keyword 가 없어도 "급한거", "높은거" 같은 유의어를 놓치지 마세요.
 
 **애매하면 route_rag** — 회사 문서 검색이 더 안전합니다. 검색해서 관련 없으면 어차피 일반 LLM 답변이 나오므로 손해 없음."""
 
 
-def _last_user_content(body: ChatCompletionRequest) -> str | None:
-    """Return the content of the most recent user-role message, or None."""
-    for m in reversed(body.messages):
-        if m.role == "user" and m.content:
-            return m.content
-    return None
+def _recent_user_content(body: ChatCompletionRequest, n: int = 2) -> str | None:
+    """Return the last N user messages joined by '---' for context-aware classification.
+
+    Follow-up messages like "우선순위 높은거" or "5는 문서잖아" are meaningless
+    standalone but resolvable when the prior user turn is included. Cap at N=2
+    to keep classifier prompt short (Qwen tool-calling stays fast).
+    """
+    user_msgs = [m.content for m in body.messages
+                 if m.role == "user" and m.content]
+    if not user_msgs:
+        return None
+    if len(user_msgs) == 1:
+        return user_msgs[0]
+    recent = user_msgs[-n:]
+    return "\n---\n".join(recent)
 
 
 def _extract_route_from_response(resp: dict[str, Any], default: str) -> str:
@@ -146,10 +167,12 @@ async def classify_intent(body: ChatCompletionRequest) -> str:
     """
     default = settings.intent_router_default
 
-    last_user = _last_user_content(body)
+    last_user = _recent_user_content(body, n=2)
     if not last_user:
         log.info("classifier: no user content, fallback=%s", default)
         return default
+
+    log.info("classifier input: %r", last_user[:200])
 
     classifier_messages = [
         {"role": "system", "content": _CLASSIFIER_SYSTEM_PROMPT},
