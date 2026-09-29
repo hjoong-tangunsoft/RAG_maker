@@ -56,6 +56,16 @@ DEFAULT_SYSTEM_PROMPT = (
     "5. `rag_search` FALLBACK: 위 1-3 tool 이 empty 결과를 반환한 경우에만 fallback\n\n"
     "잘못된 예: 'LG전자 이슈 번호' → rag_search (WRONG - LG전자 언급 없는 티켓 반환 리스크)\n"
     "올바른 예: 'LG전자 이슈 번호' → list_customer_tickets(customer_name='LG전자')\n\n"
+    "ABSOLUTE RULE - IDs 는 반드시 tool 에서만:\n"
+    "사용자가 구체적 식별자를 요청하는 표현 (예: '이슈 번호', '티켓 ID', '몇번', "
+    "'몇 번', 'ID 알려줘', '번호 알려줘', 'ticket ID') 을 사용하면, 당신은 반드시 "
+    "tool 을 호출해야 합니다. 절대로 텍스트 답변으로 구체적 ID (MAN-N, t_x, c_x 등) "
+    "를 반환하지 마세요.\n"
+    "당신은 실제 ID 를 알지 못합니다. 오직 tool 만이 ID 를 알고 있습니다.\n"
+    "이전 대화 맥락에서 '3건' 같은 count 를 봤어도, ID 자체는 모릅니다. 반드시 "
+    "list_customer_tickets 나 rag_search 를 호출해서 실제 ID 를 조회한 후 답하세요.\n"
+    "당신이 텍스트로 'MAN-0222', 't_l1' 같은 것을 쓴다면, 그것은 hallucination "
+    "입니다. Tool 을 호출하지 않고는 절대로 이런 값을 답변에 넣지 마세요.\n\n"
     "NEVER FABRICATE NUMBERS OR FACTS:\n"
     "- Do NOT state counts (customers, contracts, tickets, licenses) unless a "
     "tool response provided that exact number in this turn. If no tool covers "
@@ -137,6 +147,40 @@ DEFAULT_SYSTEM_PROMPT = (
 
 def _has_hangul(text: str) -> bool:
     return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+
+
+def _is_specific_id_request(text: str) -> bool:
+    """Detect if the user is asking for specific identifiers (ticket IDs,
+    issue numbers, etc.) that MUST come from a tool call.
+
+    Qwen 7B tends to hallucinate plausible-looking IDs when asked "번호",
+    "몇번" etc. Force tool_choice="required" on the first iteration to
+    prevent this.
+    """
+    if not text:
+        return False
+    lo = text.lower()
+    # Korean keywords for identifier-asking questions
+    korean_markers = (
+        "번호",         # 이슈 번호, 티켓 번호
+        "몇번",         # 몇번인지
+        "몇 번",        # 몇 번
+        "id 알려",      # ID 알려줘
+        "id는",         # ID는
+        "id가",         # ID가
+        "몇번이",       # 몇번이야
+        "번호가",       # 번호가
+        "번호는",       # 번호는
+        "번호를",       # 번호를
+        "티켓 목록",    # 티켓 목록 알려줘
+        "이슈 목록",    # 이슈 목록
+    )
+    if any(m in text for m in korean_markers):
+        return True
+    # English identifier-request patterns
+    english_markers = ("ticket id", "issue id", "issue number", "which tickets",
+                       "list tickets", "list issues", "ticket ids", "issue ids")
+    return any(m in lo for m in english_markers)
 
 
 def _has_chinese(text: str) -> bool:
@@ -308,12 +352,20 @@ async def run(
         iterations += 1
         if on_event:
             await on_event({"type": "thinking", "iteration": iterations})
+        # Smart tool_choice: force tool use on the first iteration when the
+        # user is asking for specific identifiers (ticket numbers, IDs, 번호).
+        # Prevents Qwen 7B from hallucinating plausible-looking IDs.
+        tc_mode: str | dict[str, Any] = "auto"
+        if iterations == 1 and _is_specific_id_request(rewritten):
+            tc_mode = "required"
+            log.info("forcing tool_choice=required (ID request detected): %r",
+                     rewritten[:80])
         resp = await llm.chat(
             messages=messages,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
-            extra={"tools": tools.TOOLS, "tool_choice": "auto"},
+            extra={"tools": tools.TOOLS, "tool_choice": tc_mode},
         )
         used_model = resp.get("model", used_model)
         choice = resp["choices"][0]["message"]
