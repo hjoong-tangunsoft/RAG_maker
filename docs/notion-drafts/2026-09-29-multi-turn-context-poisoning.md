@@ -30,7 +30,7 @@ Turn 1: user      "우선순위 뭐야?"
 Turn 2: assistant "삼성전자 4건 티켓..." (ontology dispatch)
 Turn 3: user      "삼성 관련 이슈 몇번이야?"
 Turn 4: assistant "t_s1 전체팀 로그인 불가, t_s2 인증서..."
-Turn 5: user      "엄마부터 찾는 직장동료 어떻게 생각해?"  ← 새 주제 opinion
+Turn 5: user      "재택근무 어떻게 생각해?"  ← 새 주제 opinion
 Turn 6: assistant "삼성전자와 관련된 이슈는 총 4건입니다..."  ← ???
 ```
 
@@ -43,7 +43,7 @@ Router 로그를 뜯어보면:
 ```
 classifier input: '삼성 관련 이슈 몇번이야?
 ---
-엄마부터 찾는 직장동료 어떻게 생각해?'
+재택근무 어떻게 생각해?'
 
 classifier: route=plain
 router rid=... route=plain bypass=- classifier_ms=946 total_ms=946
@@ -62,7 +62,7 @@ messages = [m.model_dump(exclude_none=True) for m in body.messages]
 #   {role: 'assistant', content: '삼성전자 4건 티켓...'},
 #   {role: 'user', content: '삼성 관련 이슈 몇번이야?'},
 #   {role: 'assistant', content: 't_s1 전체팀 로그인 불가...'},
-#   {role: 'user', content: '엄마부터 찾는 직장동료 어떻게 생각해?'},
+#   {role: 'user', content: '재택근무 어떻게 생각해?'},
 # ]
 ```
 
@@ -92,9 +92,9 @@ if route == "plain":
                 "이전 turn 들이 다른 주제 (고객 티켓, 갱신 위험 등 업무 데이터) "
                 "를 다루었더라도, 현재 질문이 그와 무관한 주제 (개인/철학/opinion) "
                 "라면 이전 문맥을 답변에 끌어오지 마세요. 예를 들어 이전에 "
-                "삼성전자 티켓을 논의했더라도 현재 질문이 '엄마와 관련된 "
-                "직장동료 어떻게 생각해' 같은 인간관계 opinion 이면 삼성전자 "
-                "티켓 이야기를 하지 말고 opinion 자체에 답하세요."
+                "삼성전자 티켓을 논의했더라도 현재 질문이 '재택근무 어떻게 "
+                "생각해' 같은 opinion 이면 삼성전자 티켓 이야기를 하지 말고 "
+                "opinion 자체에 답하세요."
             ),
         }
         messages = [reset_system] + messages
@@ -104,7 +104,7 @@ if route == "plain":
 
 1. **최우선 순위 명시**: "마지막 메시지에 답변" 을 first priority 로 지정
 2. **현재 질문 명시 인용**: LLM 이 attention 을 놓치지 않도록 직접 인용 (400자 cap)
-3. **구체적 anti-pattern 예시**: "삼성 티켓 논의했더라도 엄마 관련 opinion 에는 opinion 답변"
+3. **구체적 anti-pattern 예시**: "삼성 티켓 논의했더라도 opinion 질문에는 opinion 답변"
 
 ## 실측 결과
 
@@ -119,17 +119,17 @@ Fix 배포 후 같은 시나리오 재테스트:
 
 **After**:
 ```
-엄마부터 직장 동료를 찾는 것은 조금 특별한 접근법입니다. 일반적으로는 업무
-능력, 경험, 그리고 협업 능력을 기준으로 동료를 선택하는 것이 좋습니다.
-하지만 당신의 엄마가 해당 분야에서 전문성을 가지고 있다면, 그녀의 지식과
-경험은 매우 유용할 수 있습니다...
+재택근무는 개인의 성향과 업무 성격에 따라 장단점이 명확한 방식입니다. 자율성과
+집중력을 중시하는 사람에게는 잘 맞고, 팀 협업과 경계 분리가 중요한 사람에게는
+어려울 수 있습니다. 또한 조직 문화나 관리 방식이 재택근무에 맞춰 설계되어
+있는지도 중요한 변수입니다...
 ```
 
 Samsung 언급 0회. Opinion 답변 정확. 서버 로그에도 `topic-switch guard prepended` 흔적 확인:
 
 ```
 router plain route + multi-turn: topic-switch guard prepended
-(last_user='엄마부터 찾는 직장동료 어떻게 생각해?')
+(last_user='재택근무 어떻게 생각해?')
 ```
 
 ## 왜 이 발견이 중요한가
