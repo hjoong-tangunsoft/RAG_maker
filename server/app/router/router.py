@@ -263,8 +263,47 @@ async def _proxy_to_litellm(
     When `request_id` is provided, injects it as LiteLLM metadata so
     LiteLLM_SpendLogs rows carry the correlation id. `shadow_route`
     (if set) records what the classifier WOULD have chosen.
+
+    Topic-switch guard: when route=plain but the message history has
+    prior assistant turns (multi-turn conversation), prepend a system
+    message reminding the LLM to focus on the latest user message and
+    NOT continue prior business-topic threads. Fixes cases where Qwen 7B
+    inherits Samsung/LG ticket context and answers a philosophical
+    question with irrelevant ticket data.
     """
     messages = [m.model_dump(exclude_none=True) for m in body.messages]
+
+    # Topic-switch guard for plain route with multi-turn history.
+    # Prepend a system message that forces focus on the last user message.
+    # Only apply when there's real multi-turn (>= 1 assistant reply).
+    if route == "plain":
+        has_prior_assistant = any(m.get("role") == "assistant" for m in messages)
+        if has_prior_assistant:
+            last_user_msg = next(
+                (m.get("content", "") for m in reversed(messages)
+                 if m.get("role") == "user" and m.get("content")),
+                "",
+            )
+            reset_system = {
+                "role": "system",
+                "content": (
+                    "가장 중요한 것은 사용자의 마지막 메시지 입니다. 그 메시지에 "
+                    "직접적으로 답변하세요.\n\n"
+                    f"사용자의 현재 질문: {last_user_msg[:400]}\n\n"
+                    "이전 turn 들이 다른 주제 (고객 티켓, 갱신 위험 등 업무 데이터) "
+                    "를 다루었더라도, 현재 질문이 그와 무관한 주제 (개인적/철학적 "
+                    "질문, opinion, 일반 상식, 코딩) 라면 이전 문맥을 답변에 끌어오지 "
+                    "마세요. 예를 들어 이전에 삼성전자 티켓을 논의했더라도 현재 질문이 "
+                    "'엄마와 관련된 직장동료 어떻게 생각해' 같은 인간관계 opinion 이면 "
+                    "삼성전자 티켓 이야기를 하지 말고 opinion 자체에 답하세요."
+                ),
+            }
+            # Prepend reset_system so it appears first (LLM reads system first)
+            messages = [reset_system] + messages
+            log.info(
+                "plain route + multi-turn: topic-switch guard prepended (last_user=%r)",
+                last_user_msg[:80],
+            )
 
     extra: dict[str, Any] | None = None
     if request_id:
