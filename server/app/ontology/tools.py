@@ -176,12 +176,16 @@ TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Search the internal RAG knowledge base (ingested documents, "
                 "JIRA issue exports, wiki pages, PDFs, notes, etc.) by semantic "
-                "similarity. Use this WHENEVER the user asks about JIRA issues, "
-                "documents, notes, tickets exported to the knowledge base, or "
-                "any factual content that is NOT customer/contract/renewal data "
-                "in the business ontology. NEVER answer 'I need to check the "
-                "JIRA API / web' - always call this tool first. Returns the "
-                "top matching passages with source labels."
+                "similarity. Use this as a FALLBACK when:\n"
+                "  - No specific customer is targeted (broad topic search), OR\n"
+                "  - `list_customer_tickets` returned empty for the target customer\n"
+                "**DO NOT use rag_search when the user is asking for tickets of "
+                "one specific named customer** (예: 'LG전자 이슈 번호'). Use "
+                "`list_customer_tickets` first - it queries the ontology DB "
+                "directly and returns exact ticket IDs without RAG semantic-"
+                "search false positives. NEVER answer 'I need to check the "
+                "JIRA API / web' - always call an appropriate tool first. "
+                "Returns the top matching passages with source labels."
             ),
             "parameters": {
                 "type": "object",
