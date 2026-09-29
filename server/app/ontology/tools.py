@@ -129,6 +129,49 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_customer_tickets",
+            "description": (
+                "List support tickets for a single customer, pulled directly "
+                "from the business ontology DB (NOT from RAG index). Use this "
+                "when the user asks for a specific customer's ticket IDs, "
+                "issue numbers, ticket history, or 'what tickets does [customer] "
+                "have'. Prefer this over rag_search when the target is one "
+                "specific customer - it returns exact ticket IDs (e.g. "
+                "'MAN-176', 'MAN-201') without RAG semantic-search false "
+                "positives. Provide EITHER customer_id ('c_lg_electronics') "
+                "OR customer_name ('LG전자') - if you only know the display "
+                "name, pass it as customer_name and the tool will resolve it. "
+                "Returns recent tickets within `since_days` window ordered by "
+                "opened_at desc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_id": {
+                        "type": "string",
+                        "description": "Internal customer id (e.g. 'c_lg_electronics'). Prefer this if known.",
+                    },
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Display name (e.g. 'LG전자'). Use this if you don't know the id.",
+                    },
+                    "since_days": {
+                        "type": "integer",
+                        "description": "Only include tickets opened within this many days from today.",
+                        "default": 90,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of tickets to return (default 20, max 100).",
+                        "default": 20,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "rag_search",
             "description": (
                 "Search the internal RAG knowledge base (ingested documents, "
@@ -198,6 +241,18 @@ def dispatch(name: str, arguments_json: str) -> str:
             result = actions.list_customer_contracts(
                 customer_id=str(cid) if cid else None,
                 customer_name=str(cname) if cname else None,
+            )
+            return result.model_dump_json()
+        if name == "list_customer_tickets":
+            cid = args.get("customer_id")
+            cname = args.get("customer_name")
+            if not cid and not cname:
+                return json.dumps({"error": "customer_id or customer_name is required"})
+            result = actions.list_customer_tickets(
+                customer_id=str(cid) if cid else None,
+                customer_name=str(cname) if cname else None,
+                since_days=int(args.get("since_days", 90) or 90),
+                limit=max(1, min(int(args.get("limit", 20) or 20), 100)),
             )
             return result.model_dump_json()
         if name == "rag_search":

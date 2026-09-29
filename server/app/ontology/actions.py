@@ -16,10 +16,12 @@ from .models import (
     CustomerContractsReport,
     CustomerListItem,
     CustomerListReport,
+    CustomerTicketsReport,
     Product,
     RenewalRiskItem,
     RenewalRiskReport,
     ResponsePlan,
+    SupportTicket,
     Vendor,
 )
 
@@ -273,5 +275,76 @@ def list_customer_contracts(
             id=cust["id"], name=cust["name"], industry=cust["industry"],
         ),
         generated_at=datetime.now(),
+        items=items,
+    )
+
+
+def list_customer_tickets(
+    *,
+    customer_id: str | None = None,
+    customer_name: str | None = None,
+    since_days: int = 90,
+    limit: int = 20,
+) -> CustomerTicketsReport:
+    """List support tickets for a single customer directly from ontology DB.
+
+    Bypasses RAG index — solves data gap where a customer exists in the
+    ontology (e.g. LG전자) but JIRA export has no matching mention.
+    Accepts either customer_id ('c_lg_electronics') or display name
+    ('LG전자'). Returns tickets opened within `since_days` window.
+    """
+    if not customer_id and not customer_name:
+        raise ValueError("customer_id or customer_name is required")
+    since = datetime.now() - timedelta(days=since_days)
+    with db.connect() as conn:
+        if customer_id:
+            cust = conn.execute(
+                "SELECT * FROM customer WHERE id=?", (customer_id,),
+            ).fetchone()
+        else:
+            cust = conn.execute(
+                "SELECT * FROM customer WHERE name=?", (customer_name,),
+            ).fetchone()
+            if cust is None:
+                cust = conn.execute(
+                    "SELECT * FROM customer WHERE name LIKE ? LIMIT 1",
+                    (f"%{customer_name}%",),
+                ).fetchone()
+        if cust is None:
+            key = customer_id or customer_name
+            raise ValueError(f"customer not found: {key}")
+
+        rows = conn.execute(
+            "SELECT id, customer_id, product_id, opened_at, closed_at, "
+            "  severity, assignee_id, title "
+            "FROM support_ticket "
+            "WHERE customer_id = ? AND opened_at >= ? "
+            "ORDER BY opened_at DESC "
+            "LIMIT ?",
+            (cust["id"], since.isoformat(), int(limit)),
+        ).fetchall()
+
+    items = [
+        SupportTicket(
+            id=r["id"],
+            customer_id=r["customer_id"],
+            product_id=r["product_id"],
+            opened_at=datetime.fromisoformat(r["opened_at"]),
+            closed_at=(
+                datetime.fromisoformat(r["closed_at"]) if r["closed_at"] else None
+            ),
+            severity=r["severity"],
+            assignee_id=r["assignee_id"],
+            title=r["title"],
+        )
+        for r in rows
+    ]
+
+    return CustomerTicketsReport(
+        customer=Customer(
+            id=cust["id"], name=cust["name"], industry=cust["industry"],
+        ),
+        generated_at=datetime.now(),
+        since_days=since_days,
         items=items,
     )

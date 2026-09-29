@@ -652,6 +652,10 @@ def _narrate_call(name: str, args_json: str) -> str:
     if name == "rag_search":
         q = args.get("query", "")
         return f"`rag_search` 도구로 RAG 지식베이스에서 **{q}** 를 검색합니다."
+    if name == "list_customer_tickets":
+        who = args.get("customer_name") or args.get("customer_id") or "?"
+        since = args.get("since_days", 90)
+        return f"`list_customer_tickets` 도구로 **{who}** 고객의 최근 {since}일 지원 티켓을 조회합니다."
     return f"`{name}` 도구를 호출합니다."
 
 
@@ -681,6 +685,14 @@ def _narrate_result(name: str, result_json: str) -> str:
             return "RAG 지식베이스에서 관련 문서를 찾지 못했습니다."
         srcs = list({(it.get("source") or "?") for it in items[:5]})
         return f"RAG에서 {len(items)}건의 관련 passage를 찾았습니다 (출처: {', '.join(srcs[:3])})."
+    if name == "list_customer_tickets" and isinstance(data, dict) and isinstance(data.get("items"), list):
+        items = data["items"]
+        cust_name = (data.get("customer") or {}).get("name", "?")
+        if not items:
+            return f"**{cust_name}** 고객의 최근 지원 티켓이 없습니다."
+        ids = [it.get("id", "?") for it in items[:3]]
+        more = f" 외 {len(items)-3}건" if len(items) > 3 else ""
+        return f"**{cust_name}** 고객의 지원 티켓 {len(items)}건: {', '.join(ids)}{more}."
     if isinstance(data, dict) and isinstance(data.get("items"), list):
         return f"{len(data['items'])}건 조회 완료."
     if isinstance(data, list):

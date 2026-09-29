@@ -124,3 +124,15 @@ class CustomerContractsReport(BaseModel):
     customer: Customer
     generated_at: datetime
     items: list[ContractDetail]
+
+
+class CustomerTicketsReport(BaseModel):
+    """Response for `list_customer_tickets` — direct ontology query.
+
+    Ontology customer 에 붙은 support_ticket 을 SQL 로 직접 가져오므로
+    RAG DB (JIRA export) 의 데이터 gap 과 무관하게 정확한 결과 반환.
+    """
+    customer: Customer
+    generated_at: datetime
+    since_days: int
+    items: list[SupportTicket]
